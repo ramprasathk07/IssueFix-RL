@@ -44,6 +44,7 @@ def export_opencode_filtered(
     # Progress bar: we don't know total, so leave total=None (infinite)
     pbar = tqdm(desc="Filtering samples", unit=" samples", dynamic_ncols=True)
 
+    output_path = f'{output_path}_{max_samples}.jsonl'
     with open(output_path, "w", encoding="utf-8") as f:
         for item in dataset:
             total_checked += 1
@@ -87,7 +88,7 @@ if __name__ == "__main__":
                         help="HuggingFace tokenizer for length filtering")
     parser.add_argument("--min_len", type=int, default=1024,
                         help="Minimum token length of solution (inclusive)")
-    parser.add_argument("--max_len", type=int, default=8192,
+    parser.add_argument("--max_len", type=int, default=4096,
                         help="Maximum token length of solution (inclusive)")
     args = parser.parse_args()
 
