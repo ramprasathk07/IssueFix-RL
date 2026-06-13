@@ -124,10 +124,11 @@ def collate_fn(batch: List[Dict[str, torch.Tensor]], pad_token_id: int = 0) -> D
         "attention_mask": padded_masks,
     }
 
-def create_sft_dataloader(    
+def create_sft_dataloader(
         data: List[Dict[str, str]],
         tokenizer: PreTrainedTokenizer,
         data_config: DataloaderParams,
+        drop_last: bool = False,
         ) -> DataLoader:
 
     dataset = SFTDataset(data, tokenizer, data_config.max_length, SYSTEM_PROMPT, data_config.pre_tokenize)
@@ -144,7 +145,8 @@ def create_sft_dataloader(
         num_workers=data_config.num_workers,
         pin_memory=data_config.pin_memory,
         prefetch_factor=data_config.prefetch_factor if data_config.num_workers > 0 else None,
-        persistent_workers=True if data_config.num_workers > 0 else False,
+        persistent_workers=data_config.num_workers > 0,
+        drop_last=drop_last,
     )
 
 if __name__ == "__main__":

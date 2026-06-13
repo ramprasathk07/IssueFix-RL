@@ -53,6 +53,9 @@ class TrainingParams(BaseModel):
     output_dir: str = "./outputs"
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
+    mlflow_tracking_uri: Optional[str] = None
+    mlflow_experiment: str = "sft_training"
+    num_gpus: int = Field(default=1, ge=1)  # informational; actual count set by accelerate launch
 
 
 class Config(BaseModel):

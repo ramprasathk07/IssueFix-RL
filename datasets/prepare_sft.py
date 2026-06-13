@@ -44,7 +44,7 @@ def export_opencode_filtered(
     # Progress bar: we don't know total, so leave total=None (infinite)
     pbar = tqdm(desc="Filtering samples", unit=" samples", dynamic_ncols=True)
 
-    output_path = f'{output_path}_{max_samples}.jsonl'
+    output_path = f'{output_path.split(".jsonl")[0]}_sl{max_len}_{max_samples}.jsonl'
     with open(output_path, "w", encoding="utf-8") as f:
         for item in dataset:
             total_checked += 1
@@ -79,7 +79,7 @@ def export_opencode_filtered(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--max_samples", type=int, default=10_000,
+    parser.add_argument("--max_samples", type=int, default=5000,
                         help="Number of filtered samples to export")
     parser.add_argument("--output", type=str, default="./datasets/processed/opencode_sft_filtered.jsonl")
     parser.add_argument("--config", type=str, default="split_0", choices=["split_0", "split_1"])

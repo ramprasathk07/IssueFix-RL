@@ -1,3 +1,13 @@
+"""
+Single-GPU:
+    python train.py
+
+Multi-GPU (Kaggle 2x GPU):
+    accelerate launch --num_processes 2 train.py
+
+Resume:
+    accelerate launch --num_processes 2 train.py --resume outputs/sft_run1/checkpoint-epoch1-step150
+"""
 import argparse
 import yaml
 import sys
@@ -23,6 +33,12 @@ def parse_args() -> argparse.Namespace:
         default="datasets/processed/opencode_sft_filtered.jsonl",
         help="Path to training data .jsonl",
     )
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint dir to resume from (e.g. outputs/sft_run1/checkpoint-epoch1-step150)",
+    )
     return parser.parse_args()
 
 
@@ -34,7 +50,7 @@ def main() -> None:
 
     config = Config(**cfg_dict)
     trainer = SFTTrainer(config)
-    trainer(args.data)
+    trainer(args.data, resume_from=args.resume)
 
 
 if __name__ == "__main__":

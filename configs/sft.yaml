@@ -1,15 +1,15 @@
-# config_sft.yaml
-# Professional SFT configuration with clear sections
+# config_sft.yaml — Kaggle 2x T4 (15GB each)
 
 # ========== Model Parameters ==========
 model_params:
   base_model: "Qwen/Qwen2.5-0.5B-Instruct"
-  model_type: "AutoModelForCausalLM"       # AutoModelForCausalLM class
+  model_type: "AutoModelForCausalLM"
   trust_remote_code: true
 
-  # Quantization
+  # Quantization — keep false for multi-GPU DDP (bitsandbytes incompatible with DDP wrapping)
+  # Re-enable load_in_4bit only for single-GPU inference/training
   load_in_8bit: false
-  load_in_4bit: true
+  load_in_4bit: false
   bnb_4bit_compute_dtype: "bfloat16"
   bnb_4bit_quant_type: "nf4"
   bnb_4bit_use_double_quant: true
@@ -31,48 +31,41 @@ model_params:
 
 # ========== DataLoader Parameters ==========
 dataloader_params:
-  # DataLoader behaviour
-  batch_size: 2                         # per device batch size
-  max_length: 5120                      # max sequence length (tokens)
+  batch_size: 4                         # per-GPU; 2 GPUs x 4 x 8 grad_acc = 64 effective
+  max_length: 2048                      # safe for 15GB T4 with gradient_checkpointing
   shuffle: true
-  num_workers: 2
+  num_workers: 2                        # Kaggle is CPU-limited
   prefetch_factor: 2
   pin_memory: true
-  pre_tokenize: true                    # tokenize before training (faster)
+  pre_tokenize: true
 
 # ========== Training Hyperparameters ==========
 training_params:
   # Optimization
-  learning_rate: 2e-5                   # 1e-5 to 5e-5 (full) or 1e-4 to 5e-4 (LoRA)
-  lr_scheduler: "cosine"                # cosine, linear, constant
+  learning_rate: 2e-5
+  lr_scheduler: "cosine"
   warmup_steps: 50
-  optimizer: "adamw_torch"              # adamw_torch, adamw_8bit, paged_adamw_8bit
+  optimizer: "adamw_torch"
   weight_decay: 0.0
   max_grad_norm: 1.0
-  label_smoothing: 0.0
 
   # Training loop
   num_epochs: 3
-  gradient_accumulation_steps: 2        # effective batch = batch_size * grad_acc * num_gpus
-  sequence_len: 5120                    # context length (can differ from max_length)
+  gradient_accumulation_steps: 8       # effective batch = 4 * 2 GPUs * 8 = 64
+  num_gpus: 2
 
   # Mixed precision & performance
-  use_amp: true
   bf16: true
   fp16: false
   tf32: true
-  gradient_checkpointing: true
-  flash_attention: false
-  grad_clip: 1.0
+  gradient_checkpointing: true         # required to fit max_length=2048 in 15GB
 
   # Logging & checkpointing
   output_dir: "./outputs/sft_run1"
   logging_steps: 10
-  save_steps: 500
-  save_total_limit: 2
+  save_steps: 150
   eval_steps: 100
-  wandb_project: "my_sft_project_v1"
-  wandb_run_name: "qwen0.5_sft_run1"
-
-  # Distributed training
-  deepspeed: null                       # path to deepspeed config (ZeRO-2/3)
+  wandb_project: "my_sft_project_v3"
+  wandb_run_name: "qwen0.5_sft_2gpu"
+  mlflow_tracking_uri: null
+  mlflow_experiment: "sft_training"
