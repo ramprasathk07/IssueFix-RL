@@ -2,13 +2,17 @@
 Single-GPU:
     python train.py
 
-Multi-GPU (Kaggle 2x GPU):
+Multi-GPU (Kaggle 2x T4 notebook cell):
+    python train.py                     # auto-uses notebook_launcher when num_gpus > 1
+
+Multi-GPU (terminal / accelerate launch):
     accelerate launch --num_processes 2 train.py
 
 Resume:
     accelerate launch --num_processes 2 train.py --resume outputs/sft_run1/checkpoint-epoch1-step150
 """
 import argparse
+import os
 import yaml
 import sys
 from pathlib import Path
@@ -37,9 +41,17 @@ def parse_args() -> argparse.Namespace:
         "--resume",
         type=str,
         default=None,
-        help="Path to checkpoint dir to resume from (e.g. outputs/sft_run1/checkpoint-epoch1-step150)",
+        help="Path to checkpoint dir to resume from",
     )
     return parser.parse_args()
+
+
+def train(config_path: str, data_path: str, resume: str | None = None):
+    with open(config_path, "r", encoding="utf-8") as f:
+        cfg_dict = yaml.safe_load(f)
+    config = Config(**cfg_dict)
+    trainer = SFTTrainer(config)
+    trainer(data_path, resume_from=resume)
 
 
 def main() -> None:
@@ -47,10 +59,21 @@ def main() -> None:
 
     with open(args.config, "r", encoding="utf-8") as f:
         cfg_dict = yaml.safe_load(f)
+    num_gpus = cfg_dict.get("training_params", {}).get("num_gpus", 1)
 
-    config = Config(**cfg_dict)
-    trainer = SFTTrainer(config)
-    trainer(args.data, resume_from=args.resume)
+    if os.environ.get("WORLD_SIZE"):
+        # already launched via `accelerate launch` — run directly, accelerate owns the processes
+        train(args.config, args.data, args.resume)
+    elif num_gpus > 1:
+        # Kaggle notebook / Jupyter: notebook_launcher spawns num_gpus processes internally
+        from accelerate import notebook_launcher
+        notebook_launcher(
+            train,
+            args=(args.config, args.data, args.resume),
+            num_processes=num_gpus,
+        )
+    else:
+        train(args.config, args.data, args.resume)
 
 
 if __name__ == "__main__":

@@ -51,11 +51,18 @@ class TrainingParams(BaseModel):
     save_steps: int = 500
     eval_steps: int = 100
     output_dir: str = "./outputs"
+    save_best_k: int = Field(default=2, ge=1)  # keep only top-k epoch checkpoints by val loss
     wandb_project: Optional[str] = None
     wandb_run_name: Optional[str] = None
     mlflow_tracking_uri: Optional[str] = None
     mlflow_experiment: str = "sft_training"
     num_gpus: int = Field(default=1, ge=1)  # informational; actual count set by accelerate launch
+
+    # ── Kaggle Model Hub upload (best checkpoint, after training) ──
+    push_to_kaggle: bool = False
+    # handle format: "<owner-slug>/<model-slug>/<framework>/<variation-slug>"
+    kaggle_model_handle: Optional[str] = None
+    kaggle_model_license: str = "apache-2.0"
 
 
 class Config(BaseModel):

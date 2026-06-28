@@ -19,12 +19,29 @@ pip install -r requirements.txt
 
 ## Training
 
+### Kaggle (recommended)
+
+Open `kaggle_train.ipynb` in a Kaggle notebook with **2× GPU accelerator** enabled.
+
+**To run in background** (session-safe): click **Save Version → Save & Run All (Commit)**. Kaggle runs the notebook headlessly up to 12 hours; the zip + Kaggle Model push happen automatically at the end.
+
+What the notebook does:
+1. Clones the repo
+2. Installs requirements
+3. Verifies Kaggle API auth
+4. Previews config
+5. Runs `python train.py` — `notebook_launcher` auto-spawns both T4 processes
+6. Verifies output + shows zip path
+7. (Optional) runs checkpoint tests with sample generations
+
+### Terminal / CLI
+
 **Single GPU**
 ```bash
 python train.py
 ```
 
-**Multi-GPU (2× T4 on Kaggle)**
+**Multi-GPU**
 ```bash
 accelerate launch --num_processes 2 train.py
 ```
@@ -41,7 +58,9 @@ python train.py --config configs/sft.yaml \
                 --data datasets/processed/opencode_sft_filtered.jsonl
 ```
 
-At end of training the best checkpoint (lowest val loss) is automatically zipped to `/kaggle/working/<run_name>_best.zip` (or `output_dir` if not on Kaggle).
+At end of training:
+- Best checkpoint zipped → `/kaggle/working/<run_name>_best.zip`
+- Best checkpoint pushed → Kaggle Models page (if `push_to_kaggle: true`)
 
 ---
 
@@ -126,6 +145,14 @@ Checkpoints saved to `output_dir/checkpoint-epochN-stepM/`, containing:
 Best checkpoint (lowest val loss) is zipped at end of training.
 
 MLflow model registry: final model registered under `base_model` name if `mlflow_tracking_uri` is set.
+
+**Kaggle Models push** — set in `training_params`:
+```yaml
+push_to_kaggle: true
+kaggle_model_handle: "ramprasathk07/issuefix-sft/transformers/qwen0.5-sft"
+kaggle_model_license: "apache-2.0"
+```
+After training, best checkpoint is pushed as a new version to `https://www.kaggle.com/models/ramprasathk07/issuefix-sft`. Kaggle API credentials are auto-available in Kaggle notebook kernels (no extra setup).
 
 ---
 

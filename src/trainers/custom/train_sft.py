@@ -15,6 +15,7 @@ import json
 import time
 import random
 import zipfile
+import subprocess
 from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -221,6 +222,48 @@ class SFTTrainer:
                     zf.write(file, arcname=file.relative_to(checkpoint_path))
 
         print(f"Best checkpoint zipped → {zip_path}  ({zip_path.stat().st_size / 1e6:.1f} MB)")
+        return zip_path
+
+    def _push_to_kaggle_models(self, checkpoint_path: Path | None):
+        if not self.accelerator.is_main_process or checkpoint_path is None:
+            return
+        if not self.train_cfg.push_to_kaggle or not self.train_cfg.kaggle_model_handle:
+            return
+
+        handle = self.train_cfg.kaggle_model_handle  # "owner/model/framework/variation"
+        parts = handle.split("/")
+        if len(parts) != 4:
+            print(f"[kaggle] invalid handle '{handle}' — expected owner/model/framework/variation")
+            return
+
+        # Verify kaggle CLI is available
+        if subprocess.run(["kaggle", "--version"], capture_output=True).returncode != 0:
+            print("[kaggle] kaggle CLI not found — skipping model push")
+            return
+
+        owner, model_slug, framework, variation = parts
+        run_name = self.train_cfg.wandb_run_name or "sft_run"
+
+        # Create model if not exists (ignore errors — likely already exists)
+        subprocess.run(
+            ["kaggle", "models", "create",
+             "--owner", owner, "--name", model_slug,
+             "--framework", framework,
+             "--license", self.train_cfg.kaggle_model_license],
+            capture_output=True,
+        )
+
+        # Push new version — creates model instance automatically if missing
+        result = subprocess.run(
+            ["kaggle", "models", "instances", "versions", "create", handle,
+             "--path", str(checkpoint_path),
+             "--version-notes", f"Best checkpoint — run: {run_name}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print(f"[kaggle] pushed → https://www.kaggle.com/models/{owner}/{model_slug}")
+        else:
+            print(f"[kaggle] push failed:\n{result.stderr.strip()}")
 
     def _load_training_state(self, checkpoint_dir: Path) -> tuple[int, int]:
         state_file = checkpoint_dir / _TRAINING_STATE_FILE
@@ -230,7 +273,7 @@ class SFTTrainer:
             )
             return 0, 0
 
-        state = torch.load(state_file, map_location="cpu")
+        state = torch.load(state_file, map_location="cpu", weights_only=False)
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         epoch = state["epoch"]
         global_step = state["global_step"]
@@ -385,11 +428,7 @@ class SFTTrainer:
             drop_last=is_distributed,
         )
 
-        total_optimizer_steps = (
-            len(train_loader) // self.train_cfg.gradient_accumulation_steps
-        ) * self.train_cfg.num_epochs
-
-        # resume
+        # resume: reload model+optimizer from checkpoint before prepare
         start_epoch = 0
         global_step = 0
         if resume_from:
@@ -398,15 +437,21 @@ class SFTTrainer:
             self._setup_optimizer()
             start_epoch, global_step = self._load_training_state(ckpt_dir)
 
-        self._setup_scheduler(total_optimizer_steps, completed_steps=global_step)
-
-        # prepare everything for distributed training
+        # prepare before computing total steps so len(train_loader) reflects
+        # per-process batch count (DDP splits dataset across ranks)
         (
             self.model,
             self.optimizer,
             train_loader,
             val_loader,
         ) = self.accelerator.prepare(self.model, self.optimizer, train_loader, val_loader)
+
+        # correct total steps: per-process batches / grad_acc * epochs
+        total_optimizer_steps = (
+            len(train_loader) // self.train_cfg.gradient_accumulation_steps
+        ) * self.train_cfg.num_epochs
+
+        self._setup_scheduler(total_optimizer_steps, completed_steps=global_step)
         if self.scheduler:
             self.scheduler = self.accelerator.prepare(self.scheduler)
 
@@ -439,6 +484,7 @@ class SFTTrainer:
             )
 
         self._zip_best_checkpoint(best_checkpoint_path)
+        self._push_to_kaggle_models(best_checkpoint_path)
 
         # register final model in MLflow registry (main process only)
         if self._mlflow and self._mlflow_run:

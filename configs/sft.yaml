@@ -63,9 +63,16 @@ training_params:
   # Logging & checkpointing
   output_dir: "./outputs/sft_run1"
   logging_steps: 10
-  save_steps: 150
+  save_steps: 150                       # mid-epoch resume checkpoint (only latest kept)
   eval_steps: 100
+  save_best_k: 2                        # keep only the 2 best epoch checkpoints (lowest val loss)
   wandb_project: "my_sft_project_v3"
   wandb_run_name: "qwen0.5_sft_2gpu"
   mlflow_tracking_uri: null
   mlflow_experiment: "sft_training"
+
+  # ── Kaggle Model Hub upload (best checkpoint pushed after training) ──
+  push_to_kaggle: true
+  # "<kaggle-username>/<model-slug>/<framework>/<variation>"
+  kaggle_model_handle: "ramprasathk07/issuefix-sft/transformers/qwen0.5-sft"
+  kaggle_model_license: "apache-2.0"

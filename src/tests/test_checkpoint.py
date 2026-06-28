@@ -73,7 +73,7 @@ def test_training_state_valid(checkpoint_dir):
     if not state_file.exists():
         pytest.skip("training_state.pt not present")
 
-    state = torch.load(state_file, map_location="cpu")
+    state = torch.load(state_file, map_location="cpu", weights_only=False)
     assert "epoch" in state, "training_state.pt missing 'epoch'"
     assert "global_step" in state, "training_state.pt missing 'global_step'"
     assert "optimizer_state_dict" in state, "training_state.pt missing 'optimizer_state_dict'"
@@ -86,7 +86,7 @@ def test_training_state_step_matches_dirname(checkpoint_dir):
     if not state_file.exists():
         pytest.skip("training_state.pt not present")
 
-    state = torch.load(state_file, map_location="cpu")
+    state = torch.load(state_file, map_location="cpu", weights_only=False)
     dir_name = checkpoint_dir.name  # e.g. checkpoint-epoch1-step150
     expected_step = int(dir_name.split("step")[-1])
     assert state["global_step"] == expected_step, (
@@ -124,7 +124,7 @@ def loaded_model(checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir))
     model = AutoModelForCausalLM.from_pretrained(
         str(checkpoint_dir),
-        dtype=torch.bfloat16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
     )
     model.eval()
