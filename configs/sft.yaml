@@ -31,7 +31,7 @@ model_params:
 
 # ========== DataLoader Parameters ==========
 dataloader_params:
-  batch_size: 4                         # per-GPU; 2 GPUs x 4 x 8 grad_acc = 64 effective
+  batch_size: 2                         # per-GPU; 2 GPUs x 2 x 16 grad_acc = 64 effective
   max_length: 2048                      # safe for 15GB T4 with gradient_checkpointing
   shuffle: true
   num_workers: 2                        # Kaggle is CPU-limited
@@ -51,7 +51,7 @@ training_params:
 
   # Training loop
   num_epochs: 3
-  gradient_accumulation_steps: 8       # effective batch = 4 * 2 GPUs * 8 = 64
+  gradient_accumulation_steps: 16      # effective batch = 2 * 2 GPUs * 16 = 64
   num_gpus: 2
 
   # Mixed precision & performance

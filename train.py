@@ -64,6 +64,7 @@ def _spawn_worker(rank: int, world_size: int, config_path: str, data_path: str, 
         "WORLD_SIZE": str(world_size),
         "MASTER_ADDR": "127.0.0.1",
         "MASTER_PORT": "29500",
+        "PYTORCH_ALLOC_CONF": "expandable_segments:True",
     })
     train(config_path, data_path, resume)
 

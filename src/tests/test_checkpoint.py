@@ -124,7 +124,7 @@ def loaded_model(checkpoint_dir):
     tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir))
     model = AutoModelForCausalLM.from_pretrained(
         str(checkpoint_dir),
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
         device_map="auto",
     )
     model.eval()

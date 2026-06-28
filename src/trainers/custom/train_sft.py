@@ -82,7 +82,7 @@ class SFTTrainer:
         self.model = AutoModelForCausalLM.from_pretrained(
             model_name,
             quantization_config=bnb_config,
-            torch_dtype=torch_dtype if bnb_config is None else None,
+            dtype=torch_dtype if bnb_config is None else None,
             # device_map="auto" conflicts with DDP — each process owns its GPU via accelerate
             device_map=None if is_distributed else "auto",
             trust_remote_code=trust_remote,
