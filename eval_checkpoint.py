@@ -219,7 +219,10 @@ def main():
 
     ckpt = Path(args.checkpoint)
     if not ckpt.exists():
-        sys.exit(f"Checkpoint not found: {ckpt}")
+        if "/" in args.checkpoint and not args.checkpoint.startswith("."):
+            ckpt = args.checkpoint  # HF hub id, e.g. Qwen/Qwen2.5-0.5B-Instruct
+        else:
+            sys.exit(f"Checkpoint not found: {ckpt}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 

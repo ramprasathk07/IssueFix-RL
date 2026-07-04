@@ -6,6 +6,31 @@ Default model: `Qwen/Qwen2.5-0.5B-Instruct`. Config tuned for **Kaggle 2× T4 (1
 
 ---
 
+## Finetuning journey — results & observations
+
+First full run ([wandb project](https://wandb.ai/New_103/my_sft_project_v3), run `qwen0.5_sft_2gpu`): 2× T4 DDP, effective batch 64, 3 epochs / 189 steps, 7.8 h. Train loss 0.161 → 0.027, val loss improved every epoch (0.0299 → 0.0273). Checkpoint: `checkpoints/checkpoint-kaggle-1` (also on [Kaggle Models](https://www.kaggle.com/models/ramprasathk07/issuefix-sft)).
+
+![Training dynamics](assets/training_dynamics.png)
+
+**But the behavioral eval (`eval_checkpoint.py`, 8 coding tasks) told a different story than the loss:**
+
+| Metric | Base Qwen2.5-0.5B | Finetuned |
+|---|---|---|
+| Emits `<think>` / `<answer>` | 0/8 · 2/8 | 0/8 · 0/8 |
+| Code runs correctly | **7/8** | 4/7 |
+| Stops before 512-token cap | **8/8** | 0/8 |
+
+Post-mortem findings (full write-up: **[docs/finetuning-journey.md](docs/finetuning-journey.md)**, eval transcripts in `docs/eval/`):
+
+1. **Wrong data file** — the run consumed `opencode_sft_filtered.jsonl`, which has `<think>` but **zero `<answer>` tags** in 10k rows; the tagged file is `opencode_sft_filtered_sl4096_10000.jsonl`.
+2. **92% truncation** — `max_length=2048` vs median sample of ~4.9k tokens, so EOS was almost never a training target → generations never stop.
+3. **DFT loss can't learn new special tokens** — gradient is scaled by the model's own token probability; freshly-initialized `<think>` starts at p≈0 → no gradient, and since `-p·log p → 0` at both extremes, the failure is *invisible in the loss* (checkpoint has p(`<think>`) ≈ 1e-14). Needs a CE warmup phase before DFT.
+4. **Scheduler double-step in DDP** — `accelerator.prepare(scheduler)` steps it once per process, so the cosine finished at mid-training and *rebounded to ~max LR* in epoch 3 (see `assets/lr_schedule.png`). Size the schedule by `steps × num_processes` or don't prepare it.
+
+Takeaway: the loss curve validated optimization, not intent — behavioral evals per checkpoint are now part of the loop. Charts regenerate via `python scripts/make_charts.py`.
+
+---
+
 ## Setup
 
 ```bash

@@ -1,0 +1,216 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+
+Checkpoint : Qwen/Qwen2.5-0.5B-Instruct
+Device     : cuda
+Max tokens : 512
+======================================================================
+Loaded.
+
+----------------------------------------------------------------------
+Test : factorial_recursive
+Time : 5.24s  |  129 tokens  |  24.6 tok/s
+Format  [ FAIL ] <think>  [ FAIL ] <answer>  [ PASS ] no_junk_after  [ FAIL ] order
+Full output:
+  ```python
+  def factorial(n):
+      if n == 0:
+          return 1
+      else:
+          return n * factorial(n-1)
+
+  n = 5
+  result = factorial(n)
+  print(result)
+  ```
+
+  This Python program defines a recursive function `factorial` that calculates the factorial of a given number `n`. It uses a base case where `n == 0`, returning 1, otherwise, it multiplies `n` by the factorial of `n-1`. The main part of the program calls this function with `n=5` and prints the result, which is 120.<|im_end|>
+Code src : markdown
+Exec   [ PASS ] expected='120'  got='120'
+----------------------------------------------------------------------
+Test : sum_list
+Q    : Write Python code to compute the sum of [1, 2, 3, 4, 5] and print it.
+Time : 3.57s  |  110 tokens  |  30.8 tok/s
+Format  [ FAIL ] <think>  [ PASS ] <answer>  [ FAIL ] no_junk_after  [ FAIL ] order
+Full output:
+  <thought>
+  To calculate the sum of a list in Python, you can use the built-in `sum()` function. This function takes a sequence (like a list) as its argument and returns the sum of all elements in that sequence.
+  </thought>
+
+  <answer>
+  ```python
+  # Define the list
+  numbers = [1, 2, 3, 4, 5]
+
+  # Calculate the sum using the sum() function
+  total_sum = sum(numbers)
+
+  # Print the result
+  print(total_sum)
+  ```
+  </answer><|im_end|>
+Code src : tag
+Exec   [ FAIL ] expected='15'  got=''
+Stderr : File "C:\Users\newpc\AppData\Local\Temp\tmpkx_4h4pc.py", line 1
+    ```python
+    ^
+SyntaxError: invalid syntax
+----------------------------------------------------------------------
+Test : reverse_string
+Q    : Write Python code to reverse the string 'hello' and print the result.
+Time : 1.85s  |  54 tokens  |  29.1 tok/s
+Format  [ FAIL ] <think>  [ PASS ] <answer>  [ FAIL ] no_junk_after  [ FAIL ] order
+Full output:
+  <thought>
+  To reverse a string in Python, we can use slicing with a negative step value (-1) to achieve this.
+  </thought>
+
+  <answer>
+  string = "hello"
+  reversed_string = string[::-1]
+  print(reversed_string)
+  </answer><|im_end|>
+Code src : tag
+Exec   [ PASS ] expected='olleh'  got='olleh'
+----------------------------------------------------------------------
+Test : fizzbuzz_15
+Time : 2.52s  |  77 tokens  |  30.5 tok/s
+Format  [ FAIL ] <think>  [ FAIL ] <answer>  [ PASS ] no_junk_after  [ FAIL ] order
+Full output:
+  ```python
+  for i in range(1, 16):
+      if i % 3 == 0 and i % 5 == 0:
+          print("FizzBuzz")
+      elif i % 3 == 0:
+          print("Fizz")
+      elif i % 5 == 0:
+          print("Buzz")
+      else:
+          print(i)
+  ```<|im_end|>
+Code src : markdown
+Exec   [ PASS ] expected='1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz'  got='1\n2\nFizz\n4\nBuzz\nFizz\n7\n8\nFizz\nBuzz\n11\nFizz\n13\n14\nFizzBuzz'
+----------------------------------------------------------------------
+Test : list_comprehension_squares
+Q    : Write Python code to print a list of squares of numbers from 1 to 5 using a list comprehension.
+Time : 1.32s  |  41 tokens  |  31.1 tok/s
+Format  [ FAIL ] <think>  [ FAIL ] <answer>  [ PASS ] no_junk_after  [ FAIL ] order
+Full output:
+  ```python
+  # List comprehension to generate squares of numbers from 1 to 5
+  squares = [x**2 for x in range(1, 6)]
+  print(squares)
+  ```<|im_end|>
+Code src : markdown
+Exec   [ PASS ] expected='[1, 4, 9, 16, 25]'  got='[1, 4, 9, 16, 25]'
+----------------------------------------------------------------------
+Test : count_vowels
+Time : 6.68s  |  198 tokens  |  29.6 tok/s
+Format  [ FAIL ] <think>  [ FAIL ] <answer>  [ PASS ] no_junk_after  [ FAIL ] order
+Full output:
+  ```python
+  def count_vowels(s):
+      """
+      Counts the number of vowels in a given string, ignoring case sensitivity.
+    
+      Parameters:
+      s (str): The input string to analyze.
+    
+      Returns:
+      int: The count of vowels in the string.
+      """
+      # Convert the string to lowercase to make the search case-insensitive
+      s = s.lower()
+      # Define the set of vowels for easy lookup
+      vowels = {'a', 'e', 'i', 'o', 'u'}
+      # Initialize a counter for vowels
+      vowel_count = 0
+    
+      # Iterate over each character in the string
+      for char in s:
+          if char in vowels:
+              # Increment the counter if the character is a vowel
+              vowel_count += 1
+            
+      return vowel_count
+
+  # Test the function with the provided example
+  print(count_vowels('Hello World'))  # Expected output: 3
+  ```<|im_end|>
+Code src : markdown
+Exec   [ PASS ] expected='3'  got='3'
+----------------------------------------------------------------------
+Test : bug_fix
+Q    : Fix the bug in this Python function and print the result of calling it with a=3, b=4:
+Time : 4.68s  |  133 tokens  |  28.4 tok/s
+Format  [ FAIL ] <think>  [ FAIL ] <answer>  [ PASS ] no_junk_after  [ FAIL ] order
+Full output:
+  To fix the bug in the provided Python function `add`, we need to ensure that the subtraction operation is performed correctly. The current implementation subtracts `b` from `a`, but since `a` is initially set to 3, the correct operation should be `-a`. Here's the corrected version of the function:
+
+  ```python
+  def add(a, b):
+      return a + b
+
+  # Call the function with a=3, b=4
+  result = add(3, 4)
+  print(result)  # Output: 7
+  ```
+
+  This will correctly compute the sum of 3 and 4, which is 7.<|im_end|>
+Code src : markdown
+Exec   [ PASS ] expected='7'  got='7'
+----------------------------------------------------------------------
+Test : flatten_list
+Q    : Write Python code to flatten [[1,2],[3,4],[5]] into a single list and print it.
+Time : 5.44s  |  155 tokens  |  28.5 tok/s
+Format  [ FAIL ] <think>  [ FAIL ] <answer>  [ PASS ] no_junk_after  [ FAIL ] order
+Full output:
+  ```python
+  def flatten_list(nested_list):
+      """
+      Flattens a nested list into a single list.
+    
+      :param nested_list: List of lists
+      :return: A flattened list
+      """
+      flat_list = []
+      for item in nested_list:
+          if isinstance(item, list):
+              # Recursively flatten the sublist
+              flat_list.extend(flatten_list(item))
+          else:
+              flat_list.append(item)
+      return flat_list
+
+  # Example usage
+  nested_list = [1, 2, [3, 4], [5]]
+  flattened_list = flatten_list(nested_list)
+  print(flattened_list)  # Output: [1, 2, 3, 4, 5]
+  ```<|im_end|>
+Code src : markdown
+Exec   [ PASS ] expected='[1, 2, 3, 4, 5]'  got='[1, 2, 3, 4, 5]'
+======================================================================
+SUMMARY
+======================================================================
+Format fully valid : 0/8  (0%)
+Has <think>        : 0/8  (0%)
+Has <answer>       : 2/8  (25%)
+Code via <answer>  : 2/8
+Code via markdown  : 6/8  (fallback)
+Code correctness   : 7/8  (88%)
+Avg latency        : 3.91s
+Avg tokens         : 112.1
+======================================================================
+
+Per-test breakdown:
+Test                           Format Think   Ans CodeSrc   Exec    Time   Toks
+-------------------------------------------------------------------------------
+factorial_recursive              FAIL     N     N      md   PASS    5.2s    129
+sum_list                         FAIL     N     Y     tag   FAIL    3.6s    110
+reverse_string                   FAIL     N     Y     tag   PASS    1.9s     54
+fizzbuzz_15                      FAIL     N     N      md   PASS    2.5s     77
+list_comprehension_squares       FAIL     N     N      md   PASS    1.3s     41
+count_vowels                     FAIL     N     N      md   PASS    6.7s    198
+bug_fix                          FAIL     N     N      md   PASS    4.7s    133
+flatten_list                     FAIL     N     N      md   PASS    5.4s    155
+Binary file (standard input) matches
