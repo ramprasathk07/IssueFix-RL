@@ -21,7 +21,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from data import create_sft_dataloader
-from trainers.utils import dft_loss, entropy_from_logits
+from trainers.utils import ce_loss, dft_loss, entropy_from_logits
 from configs import Config
 
 _TRAINING_STATE_FILE = "training_state.pt"
@@ -342,9 +342,15 @@ class SFTTrainer:
             labels = batch["labels"]
             model_inputs = {k: v for k, v in batch.items() if k != "labels"}
 
+            # CE warmup: bootstrap probability mass for newly added special tokens
+            # (<think>/<answer>) before DFT's p-weighted gradient takes over —
+            # DFT alone cannot lift a token whose probability starts at ~0.
+            in_ce_warmup = global_step < self.train_cfg.ce_warmup_steps
+            loss_fn = ce_loss if in_ce_warmup else dft_loss
+
             with self.accelerator.autocast():
                 results = self.model(**model_inputs)
-                loss = dft_loss(results.logits, labels) / grad_accumulation
+                loss = loss_fn(results.logits, labels) / grad_accumulation
 
             self.accelerator.backward(loss)
             running_loss += loss.item() * grad_accumulation
@@ -387,6 +393,9 @@ class SFTTrainer:
                             "train/entropy": last_entropy,
                             "train/grad_norm": last_grad_norm,
                             "train/lr": self._get_lr(),
+                            # marks the CE->DFT boundary: loss values are not
+                            # comparable across the switch
+                            "train/ce_warmup": int(in_ce_warmup),
                             "epoch": epoch + 1,
                         },
                         step=global_step,
@@ -418,6 +427,18 @@ class SFTTrainer:
         split = int(0.8 * len(data))
         train_data, val_data = data[:split], data[split:]
 
+        # data sanity: catch wrong-file mistakes (missing tags, truncated responses)
+        # before spending GPU-hours — see docs/finetuning-journey.md, Bug 1
+        probe = train_data[:100]
+        tagged = sum(1 for d in probe if "<answer>" in d["response"] and "</answer>" in d["response"])
+        sample = train_data[0]["response"]
+        self.accelerator.print(
+            f"[data] {data_path} | {len(train_data)} train / {len(val_data)} val\n"
+            f"[data] <answer> tag coverage (first {len(probe)}): {tagged}/{len(probe)}\n"
+            f"[data] sample response head: {sample[:120]!r}\n"
+            f"[data] sample response tail: {sample[-120:]!r}"
+        )
+
         is_distributed = self.accelerator.num_processes > 1
         train_loader = create_sft_dataloader(
             data=train_data, tokenizer=self.tokenizer, data_config=self.data_cfg,
@@ -446,14 +467,18 @@ class SFTTrainer:
             val_loader,
         ) = self.accelerator.prepare(self.model, self.optimizer, train_loader, val_loader)
 
-        # correct total steps: per-process batches / grad_acc * epochs
-        total_optimizer_steps = (
-            len(train_loader) // self.train_cfg.gradient_accumulation_steps
+        # correct total steps: per-process batches / grad_acc (ceil — the loop also
+        # steps on the final partial accumulation window) * epochs
+        total_optimizer_steps = -(
+            -len(train_loader) // self.train_cfg.gradient_accumulation_steps
         ) * self.train_cfg.num_epochs
 
         self._setup_scheduler(total_optimizer_steps, completed_steps=global_step)
-        if self.scheduler:
-            self.scheduler = self.accelerator.prepare(self.scheduler)
+        # NOTE: deliberately NOT passed through accelerator.prepare() — the prepared
+        # wrapper steps the scheduler num_processes times per .step() call, which
+        # compressed the cosine schedule 2x on 2 GPUs (it hit zero at mid-training,
+        # then rebounded to ~max LR). Each rank steps its identical local scheduler
+        # once per optimizer step instead.
 
         self._init_wandb()
         self._init_mlflow()

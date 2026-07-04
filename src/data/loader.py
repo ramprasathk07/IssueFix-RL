@@ -63,6 +63,18 @@ class SFTDataset(Dataset):
         if pre_tokenize:
             logger.info("Pre‑tokenizing %d examples (this may take a moment)...", len(data))
             self.examples = [self._tokenize_example(item) for item in data]
+
+            # truncation deletes the EOS target; a model that rarely sees EOS
+            # never learns to stop generating (see docs/finetuning-journey.md, Bug 2)
+            eos_id = tokenizer.eos_token_id
+            with_eos = sum(1 for ex in self.examples if ex["input_ids"][-1].item() == eos_id)
+            frac = with_eos / max(len(self.examples), 1)
+            if frac < 0.95:
+                logger.warning(
+                    "Only %.0f%% of samples keep their EOS token after truncation at "
+                    "max_length=%d — raise max_length or filter the dataset by length.",
+                    100 * frac, max_length,
+                )
         else:
             self.examples = None
         

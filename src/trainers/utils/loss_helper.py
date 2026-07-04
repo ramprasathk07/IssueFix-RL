@@ -74,6 +74,27 @@ def selective_log_softmax(logits, index) -> torch.Tensor:
 
     return per_token_logps
 
+def ce_loss(logits, labels, num_items_in_batch=None):
+    """
+    Plain token-mean cross-entropy over response tokens.
+
+    Used as a warmup phase before dft_loss when new special tokens were added to
+    the vocabulary: DFT scales each token's gradient by the model's own probability
+    of that token, so a freshly initialized embedding (p ~ 0) receives ~no gradient
+    and never becomes emittable. CE has its largest gradient exactly at p -> 0,
+    bootstrapping probability mass that DFT can then amplify.
+    """
+    labels = nn.functional.pad(labels, (0, 1), value=-100)
+    shift_labels = labels[..., 1:].contiguous()
+    loss_mask = shift_labels != -100
+    shift_labels[~loss_mask] = 0
+    logprobs = selective_log_softmax(logits, shift_labels)
+    per_token_loss = -logprobs
+    if num_items_in_batch is None:
+        num_items_in_batch = loss_mask.sum()
+    loss = (per_token_loss * loss_mask).sum() / num_items_in_batch
+    return loss
+
 def dft_loss(logits, labels, num_items_in_batch=None):
     """
     DFT loss function, as presented in [On the Generalization of SFT: A Reinforcement Learning Perspective with Reward

@@ -32,7 +32,7 @@ model_params:
 
 # ========== DataLoader Parameters ==========
 dataloader_params:
-  batch_size: 1                         # per-GPU; reduced for 6000-token sequences on 15GB T4
+  batch_size: 1                         # per-GPU; batch_size=2 @ max_length=6000 OOMs on 15GB T4 (verified 2026-07-04)
   max_length: 6000                      # response ≤4096 + prompt overhead ~800 + buffer
   shuffle: true
   num_workers: 2                        # Kaggle is CPU-limited
@@ -46,13 +46,17 @@ training_params:
   learning_rate: 2e-5
   lr_scheduler: "cosine"
   warmup_steps: 50
+  # plain CE for the first N optimizer steps, then DFT. Needed because DFT's
+  # p-weighted gradient can't lift newly added special tokens (<think>/<answer>)
+  # from p≈0 — see docs/finetuning-journey.md, Bug 3.
+  ce_warmup_steps: 60
   optimizer: "adamw_torch"
   weight_decay: 0.0
   max_grad_norm: 1.0
 
   # Training loop
   num_epochs: 3
-  gradient_accumulation_steps: 32      # effective batch = 1 * 2 GPUs * 32 = 64
+  gradient_accumulation_steps: 32      # effective batch = batch_size 1 * 2 GPUs * 32 = 64
   num_gpus: 2
 
   # Mixed precision & performance

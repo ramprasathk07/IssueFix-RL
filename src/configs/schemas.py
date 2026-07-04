@@ -45,6 +45,10 @@ class TrainingParams(BaseModel):
     gradient_accumulation_steps: int = Field(default=1, ge=1)
     warmup_steps: int = 0
     lr_scheduler: str = "cosine"
+    # optimizer steps trained with plain CE before switching to DFT loss.
+    # Required (>0) when new special tokens are added: DFT's gradient is scaled by
+    # the model's own token probability, so fresh embeddings (p~0) never learn.
+    ce_warmup_steps: int = Field(default=0, ge=0)
     use_amp: bool = False
     gradient_checkpointing: bool = False
     logging_steps: int = 10
