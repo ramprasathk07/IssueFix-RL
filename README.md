@@ -20,7 +20,7 @@ First full run ([wandb project](https://wandb.ai/New_103/my_sft_project_v3), run
 | Code runs correctly | **7/8** | 4/7 |
 | Stops before 512-token cap | **8/8** | 0/8 |
 
-Post-mortem findings (full write-up: **[docs/finetuning-journey.md](docs/finetuning-journey.md)**, eval transcripts in `docs/eval/`):
+Post-mortem findings:
 
 1. **Wrong data file** — the run consumed `opencode_sft_filtered.jsonl`, which has `<think>` but **zero `<answer>` tags** in 10k rows; the tagged file is `opencode_sft_filtered_sl4096_10000.jsonl`.
 2. **92% truncation** — `max_length=2048` vs median sample of ~4.9k tokens, so EOS was almost never a training target → generations never stop.

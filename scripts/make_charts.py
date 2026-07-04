@@ -160,7 +160,7 @@ fig.savefig(ASSETS / "lr_schedule.png")
 plt.close(fig)
 
 # ── 4. behavioral eval: base vs finetuned ───────────────────────────────────
-# numbers from docs/eval/*.txt (eval_checkpoint.py, greedy, max_new_tokens=512)
+# numbers from eval_checkpoint.py runs (greedy, max_new_tokens=512)
 metrics    = ["Runs correctly\n(exec pass)", "Stops before\n512-token cap", "Uses <answer>\ntags"]
 base_pct   = [7 / 8 * 100, 8 / 8 * 100, 2 / 8 * 100]
 ft_pct     = [4 / 7 * 100, 0.0, 0.0]

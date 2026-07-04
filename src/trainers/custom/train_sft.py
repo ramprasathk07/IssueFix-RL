@@ -428,7 +428,7 @@ class SFTTrainer:
         train_data, val_data = data[:split], data[split:]
 
         # data sanity: catch wrong-file mistakes (missing tags, truncated responses)
-        # before spending GPU-hours — see docs/finetuning-journey.md, Bug 1
+        # before spending GPU-hours
         probe = train_data[:100]
         tagged = sum(1 for d in probe if "<answer>" in d["response"] and "</answer>" in d["response"])
         sample = train_data[0]["response"]

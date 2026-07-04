@@ -48,7 +48,7 @@ training_params:
   warmup_steps: 50
   # plain CE for the first N optimizer steps, then DFT. Needed because DFT's
   # p-weighted gradient can't lift newly added special tokens (<think>/<answer>)
-  # from p≈0 — see docs/finetuning-journey.md, Bug 3.
+  # from p≈0.
   ce_warmup_steps: 60
   optimizer: "adamw_torch"
   weight_decay: 0.0

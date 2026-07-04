@@ -221,3 +221,7 @@ __marimo__/
 wandb/
 outputs/
 checkpoints/
+
+# post-mortem write-up + eval transcripts — kept local only
+docs/
+eval_output_*.log

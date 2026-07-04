@@ -65,7 +65,7 @@ class SFTDataset(Dataset):
             self.examples = [self._tokenize_example(item) for item in data]
 
             # truncation deletes the EOS target; a model that rarely sees EOS
-            # never learns to stop generating (see docs/finetuning-journey.md, Bug 2)
+            # never learns to stop generating
             eos_id = tokenizer.eos_token_id
             with_eos = sum(1 for ex in self.examples if ex["input_ids"][-1].item() == eos_id)
             frac = with_eos / max(len(self.examples), 1)
