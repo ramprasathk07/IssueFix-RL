@@ -97,6 +97,19 @@ class SFTTrainer:
     # ── optimizer / scheduler ─────────────────────────────────────────────────
 
     def _setup_optimizer(self):
+        if self.train_cfg.optimizer == "adamw_8bit":
+            try:
+                import bitsandbytes as bnb
+                self.optimizer = bnb.optim.AdamW8bit(
+                    self.model.parameters(),
+                    lr=self.train_cfg.learning_rate,
+                    weight_decay=self.train_cfg.weight_decay,
+                )
+                return
+            except ImportError:
+                self.accelerator.print(
+                    "[optim] bitsandbytes not installed — falling back to torch AdamW"
+                )
         self.optimizer = optim.AdamW(
             self.model.parameters(),
             lr=self.train_cfg.learning_rate,

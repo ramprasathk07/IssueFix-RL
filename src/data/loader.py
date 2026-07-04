@@ -53,26 +53,45 @@ class SFTDataset(Dataset):
             max_length: int = 8192,
             system_prompt: str = SYSTEM_PROMPT,
             pre_tokenize: bool = True,
+            drop_overlong: bool = False,
     ):
-        
+
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.system_prompt = system_prompt
         self.data = data
 
+        if drop_overlong and not pre_tokenize:
+            logger.warning("drop_overlong requires pre_tokenize=True — ignoring.")
+
         if pre_tokenize:
             logger.info("Pre‑tokenizing %d examples (this may take a moment)...", len(data))
             self.examples = [self._tokenize_example(item) for item in data]
+            eos_id = tokenizer.eos_token_id
+
+            if drop_overlong:
+                # an untruncated sample always ends with the appended EOS token
+                kept = [i for i, ex in enumerate(self.examples)
+                        if ex["input_ids"][-1].item() == eos_id]
+                dropped = len(self.examples) - len(kept)
+                if dropped:
+                    logger.info(
+                        "drop_overlong: dropped %d/%d samples exceeding max_length=%d "
+                        "(%.1f%% kept)",
+                        dropped, len(self.examples), max_length,
+                        100 * len(kept) / len(self.examples),
+                    )
+                self.examples = [self.examples[i] for i in kept]
+                self.data = [self.data[i] for i in kept]
 
             # truncation deletes the EOS target; a model that rarely sees EOS
             # never learns to stop generating
-            eos_id = tokenizer.eos_token_id
             with_eos = sum(1 for ex in self.examples if ex["input_ids"][-1].item() == eos_id)
             frac = with_eos / max(len(self.examples), 1)
             if frac < 0.95:
                 logger.warning(
                     "Only %.0f%% of samples keep their EOS token after truncation at "
-                    "max_length=%d — raise max_length or filter the dataset by length.",
+                    "max_length=%d — raise max_length, or set drop_overlong: true.",
                     100 * frac, max_length,
                 )
         else:
@@ -143,7 +162,8 @@ def create_sft_dataloader(
         drop_last: bool = False,
         ) -> DataLoader:
 
-    dataset = SFTDataset(data, tokenizer, data_config.max_length, SYSTEM_PROMPT, data_config.pre_tokenize)
+    dataset = SFTDataset(data, tokenizer, data_config.max_length, SYSTEM_PROMPT,
+                         data_config.pre_tokenize, drop_overlong=data_config.drop_overlong)
     pad_token_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
 
     from functools import partial

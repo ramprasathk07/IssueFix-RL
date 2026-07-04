@@ -1,5 +1,7 @@
 # config_sft.yaml — Kaggle 2x T4 (15GB each)
 # Dataset: opencode_sft_filtered_sl4096_10000.jsonl (response ≤4096 tok, prompt overhead ~800 tok)
+# NOTE: edit THIS file — don't overwrite from a notebook %%writefile; a hand-rolled
+# copy once dropped ce_warmup_steps and silently disabled the CE warmup fix.
 
 # ========== Model Parameters ==========
 model_params:
@@ -32,8 +34,9 @@ model_params:
 
 # ========== DataLoader Parameters ==========
 dataloader_params:
-  batch_size: 1                         # per-GPU; batch_size=2 @ max_length=6000 OOMs on 15GB T4 (verified 2026-07-04)
-  max_length: 6000                      # response ≤4096 + prompt overhead ~800 + buffer
+  batch_size: 1                         # per-GPU; bs=2 @ ml=6000 and bs=1 @ ml=5000 both OOM on 15GB T4 (verified 2026-07-04)
+  max_length: 4096                      # logits chain = 3 × seq × 151k vocab × 2B in backward; 4096 leaves ~2GB headroom
+  drop_overlong: true                   # drop the ~14% of samples >4096 tok instead of truncating (truncation strips EOS)
   shuffle: true
   num_workers: 2                        # Kaggle is CPU-limited
   prefetch_factor: 2
@@ -50,12 +53,13 @@ training_params:
   # p-weighted gradient can't lift newly added special tokens (<think>/<answer>)
   # from p≈0.
   ce_warmup_steps: 60
-  optimizer: "adamw_torch"
+  optimizer: "adamw_8bit"               # bitsandbytes 8-bit optimizer states (DDP-safe) — saves ~1.5GB vs torch AdamW
   weight_decay: 0.0
   max_grad_norm: 1.0
 
   # Training loop
-  num_epochs: 3
+  num_epochs: 2                        # ~108 steps/epoch after drop_overlong; 3 epochs risks the 12h Kaggle cap
+                                       # (nothing gets pushed if the session is killed) — resume epoch 3 next session
   gradient_accumulation_steps: 32      # effective batch = batch_size 1 * 2 GPUs * 32 = 64
   num_gpus: 2
 
@@ -72,7 +76,7 @@ training_params:
   eval_steps: 100
   save_best_k: 2                        # keep only the 2 best epoch checkpoints (lowest val loss)
   wandb_project: "my_sft_project_v3"
-  wandb_run_name: "qwen0.5_sft_10k_sl6000"
+  wandb_run_name: "qwen0.5_sft_10k_sl4096"
   mlflow_tracking_uri: null
   mlflow_experiment: "sft_training"
 

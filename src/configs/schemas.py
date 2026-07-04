@@ -12,6 +12,10 @@ class DataloaderParams(BaseModel):
     prefetch_factor: int = Field(default=2, ge=1)
     pin_memory: bool = Field(default=True)
     pre_tokenize: bool = Field(default=True)
+    # drop samples longer than max_length instead of truncating them —
+    # truncation strips the EOS target, teaching the model to never stop.
+    # Requires pre_tokenize.
+    drop_overlong: bool = Field(default=False)
 
 
 class ModelParams(BaseModel):
@@ -45,6 +49,9 @@ class TrainingParams(BaseModel):
     gradient_accumulation_steps: int = Field(default=1, ge=1)
     warmup_steps: int = 0
     lr_scheduler: str = "cosine"
+    # "adamw_torch" or "adamw_8bit" (bitsandbytes; optimizer-state quantization is
+    # DDP-safe, unlike weight quantization — saves ~1.5GB on a 0.5B full finetune)
+    optimizer: str = "adamw_torch"
     # optimizer steps trained with plain CE before switching to DFT loss.
     # Required (>0) when new special tokens are added: DFT's gradient is scaled by
     # the model's own token probability, so fresh embeddings (p~0) never learn.
