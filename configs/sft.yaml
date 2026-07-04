@@ -1,4 +1,5 @@
 # config_sft.yaml — Kaggle 2x T4 (15GB each)
+# Dataset: opencode_sft_filtered_sl4096_10000.jsonl (response ≤4096 tok, prompt overhead ~800 tok)
 
 # ========== Model Parameters ==========
 model_params:
@@ -31,8 +32,8 @@ model_params:
 
 # ========== DataLoader Parameters ==========
 dataloader_params:
-  batch_size: 2                         # per-GPU; 2 GPUs x 2 x 16 grad_acc = 64 effective
-  max_length: 2048                      # safe for 15GB T4 with gradient_checkpointing
+  batch_size: 1                         # per-GPU; reduced for 6000-token sequences on 15GB T4
+  max_length: 6000                      # response ≤4096 + prompt overhead ~800 + buffer
   shuffle: true
   num_workers: 2                        # Kaggle is CPU-limited
   prefetch_factor: 2
@@ -51,14 +52,14 @@ training_params:
 
   # Training loop
   num_epochs: 3
-  gradient_accumulation_steps: 16      # effective batch = 2 * 2 GPUs * 16 = 64
+  gradient_accumulation_steps: 32      # effective batch = 1 * 2 GPUs * 32 = 64
   num_gpus: 2
 
   # Mixed precision & performance
   bf16: true
   fp16: false
   tf32: true
-  gradient_checkpointing: true         # required to fit max_length=2048 in 15GB
+  gradient_checkpointing: true         # required to fit max_length=6000 in 15GB
 
   # Logging & checkpointing
   output_dir: "./outputs/sft_run1"
@@ -67,7 +68,7 @@ training_params:
   eval_steps: 100
   save_best_k: 2                        # keep only the 2 best epoch checkpoints (lowest val loss)
   wandb_project: "my_sft_project_v3"
-  wandb_run_name: "qwen0.5_sft_2gpu"
+  wandb_run_name: "qwen0.5_sft_10k_sl6000"
   mlflow_tracking_uri: null
   mlflow_experiment: "sft_training"
 

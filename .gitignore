@@ -220,3 +220,4 @@ __marimo__/
 *.stackdump
 wandb/
 outputs/
+checkpoints/
