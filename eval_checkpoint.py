@@ -22,6 +22,11 @@ from typing import Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+# Windows console defaults to cp1252 and dies on model output containing e.g. arrows
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 # ---------------------------------------------------------------------------
 # Test suite
 # ---------------------------------------------------------------------------

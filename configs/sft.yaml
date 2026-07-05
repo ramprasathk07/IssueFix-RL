@@ -51,8 +51,12 @@ training_params:
   warmup_steps: 50
   # plain CE for the first N optimizer steps, then DFT. Needed because DFT's
   # p-weighted gradient can't lift newly added special tokens (<think>/<answer>)
-  # from p≈0.
-  ce_warmup_steps: 60
+  # from p≈0. 60 was too short (~10% of a 2-epoch/600-step run) — <think>/<answer>
+  # never escaped p≈0 before DFT froze their gradient near-zero, so both the
+  # kaggle-1 and sft_run1 checkpoints emit 0/8 format. Set above total
+  # optimizer steps (~600 for num_epochs=2 here) to disable DFT and stay on
+  # plain CE the whole run.
+  ce_warmup_steps: 1000
   optimizer: "adamw_8bit"               # bitsandbytes 8-bit optimizer states (DDP-safe) — saves ~1.5GB vs torch AdamW
   weight_decay: 0.0
   max_grad_norm: 1.0
