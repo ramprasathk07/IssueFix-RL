@@ -1,7 +1,12 @@
 # config_sft.yaml — Kaggle 2x T4 (15GB each)
 # Dataset: opencode_sft_filtered_sl4096_10000.jsonl (response ≤4096 tok, prompt overhead ~800 tok)
 # NOTE: edit THIS file — don't overwrite from a notebook %%writefile; a hand-rolled
-# copy once dropped ce_warmup_steps and silently disabled the CE warmup fix.
+# copy once dropped a config field and silently disabled a fix.
+#
+# Loss: plain cross-entropy (src/trainers/utils/loss_helper.py:ce_loss). DFT
+# was tried and reverted — it locks newly added special tokens (<think>/
+# <answer>) at p≈0 forever, since its gradient is scaled by the model's own
+# (near-zero) token probability. See docs/dft-special-token-lockout.md.
 
 # ========== Model Parameters ==========
 model_params:
@@ -35,8 +40,9 @@ model_params:
 # ========== DataLoader Parameters ==========
 dataloader_params:
   batch_size: 1                         # per-GPU; bs=2 @ ml=6000 and bs=1 @ ml=5000 both OOM on 15GB T4 (verified 2026-07-04)
-  max_length: 4096                      # logits chain = 3 × seq × 151k vocab × 2B in backward; 4096 leaves ~2GB headroom
-  drop_overlong: true                   # drop the ~14% of samples >4096 tok instead of truncating (truncation strips EOS)
+  max_length: 3584                      # ml=4096 OOM'd on one of two identical runs (dxjxtj8v crashed <10 steps,
+                                        # xvf3e52l survived to step 200) — right on the memory edge; 3584 adds margin
+  drop_overlong: true                   # drop the ~26% of samples >3584 tok instead of truncating (truncation strips EOS)
   shuffle: true
   num_workers: 2                        # Kaggle is CPU-limited
   prefetch_factor: 2
@@ -49,20 +55,12 @@ training_params:
   learning_rate: 2e-5
   lr_scheduler: "cosine"
   warmup_steps: 50
-  # plain CE for the first N optimizer steps, then DFT. Needed because DFT's
-  # p-weighted gradient can't lift newly added special tokens (<think>/<answer>)
-  # from p≈0. 60 was too short (~10% of a 2-epoch/600-step run) — <think>/<answer>
-  # never escaped p≈0 before DFT froze their gradient near-zero, so both the
-  # kaggle-1 and sft_run1 checkpoints emit 0/8 format. Set above total
-  # optimizer steps (~600 for num_epochs=2 here) to disable DFT and stay on
-  # plain CE the whole run.
-  ce_warmup_steps: 1000
   optimizer: "adamw_8bit"               # bitsandbytes 8-bit optimizer states (DDP-safe) — saves ~1.5GB vs torch AdamW
   weight_decay: 0.0
   max_grad_norm: 1.0
 
   # Training loop
-  num_epochs: 2                        # ~108 steps/epoch after drop_overlong; 3 epochs risks the 12h Kaggle cap
+  num_epochs: 2                        # ~92 steps/epoch after drop_overlong; 3 epochs risks the 12h Kaggle cap
                                        # (nothing gets pushed if the session is killed) — resume epoch 3 next session
   gradient_accumulation_steps: 32      # effective batch = batch_size 1 * 2 GPUs * 32 = 64
   num_gpus: 2
@@ -71,7 +69,7 @@ training_params:
   bf16: true
   fp16: false
   tf32: true
-  gradient_checkpointing: true         # required to fit max_length=6000 in 15GB
+  gradient_checkpointing: true         # required to fit training in 15GB
 
   # Logging & checkpointing
   output_dir: "./outputs/sft_run1"
@@ -79,8 +77,8 @@ training_params:
   save_steps: 150                       # mid-epoch resume checkpoint (only latest kept)
   eval_steps: 100
   save_best_k: 2                        # keep only the 2 best epoch checkpoints (lowest val loss)
-  wandb_project: "my_sft_project_v3"
-  wandb_run_name: "qwen0.5_sft_10k_sl4096"
+  wandb_project: "my_sft_project_v4"    # fresh project — v3 has 12 runs from the DFT-lockout debugging cycle
+  wandb_run_name: "qwen0.5_sft_10k_ce_sl3584"
   mlflow_tracking_uri: null
   mlflow_experiment: "sft_training"
 

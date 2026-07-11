@@ -76,13 +76,13 @@ def selective_log_softmax(logits, index) -> torch.Tensor:
 
 def ce_loss(logits, labels, num_items_in_batch=None):
     """
-    Plain token-mean cross-entropy over response tokens.
+    Plain token-mean cross-entropy over response tokens. The trainer's loss.
 
-    Used as a warmup phase before dft_loss when new special tokens were added to
-    the vocabulary: DFT scales each token's gradient by the model's own probability
-    of that token, so a freshly initialized embedding (p ~ 0) receives ~no gradient
-    and never becomes emittable. CE has its largest gradient exactly at p -> 0,
-    bootstrapping probability mass that DFT can then amplify.
+    dft_loss (below) was tried and reverted: it scales each token's gradient by
+    the model's own probability of that token, so a freshly initialized special-
+    token embedding (p ~ 0) receives ~no gradient and never becomes emittable —
+    see docs/dft-special-token-lockout.md. Plain CE has its largest gradient
+    exactly at p -> 0, so new vocabulary is actually learnable.
     """
     labels = nn.functional.pad(labels, (0, 1), value=-100)
     shift_labels = labels[..., 1:].contiguous()
@@ -99,6 +99,9 @@ def dft_loss(logits, labels, num_items_in_batch=None):
     """
     DFT loss function, as presented in [On the Generalization of SFT: A Reinforcement Learning Perspective with Reward
     Rectification](https://huggingface.co/papers/2508.05629)
+
+    Not wired into the trainer — locks out newly added special tokens
+    (<think>/<answer>) at p~0 forever. See docs/dft-special-token-lockout.md.
     """
     labels = nn.functional.pad(labels, (0, 1), value=-100)
     shift_labels = labels[..., 1:].contiguous()

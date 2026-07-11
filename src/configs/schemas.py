@@ -52,10 +52,6 @@ class TrainingParams(BaseModel):
     # "adamw_torch" or "adamw_8bit" (bitsandbytes; optimizer-state quantization is
     # DDP-safe, unlike weight quantization — saves ~1.5GB on a 0.5B full finetune)
     optimizer: str = "adamw_torch"
-    # optimizer steps trained with plain CE before switching to DFT loss.
-    # Required (>0) when new special tokens are added: DFT's gradient is scaled by
-    # the model's own token probability, so fresh embeddings (p~0) never learn.
-    ce_warmup_steps: int = Field(default=0, ge=0)
     use_amp: bool = False
     gradient_checkpointing: bool = False
     logging_steps: int = 10

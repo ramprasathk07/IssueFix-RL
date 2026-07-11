@@ -21,7 +21,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from data import create_sft_dataloader
-from trainers.utils import ce_loss, dft_loss, entropy_from_logits
+from trainers.utils import ce_loss, entropy_from_logits
 from configs import Config
 
 _TRAINING_STATE_FILE = "training_state.pt"
@@ -306,7 +306,7 @@ class SFTTrainer:
                 labels = batch["labels"]
                 model_inputs = {k: v for k, v in batch.items() if k != "labels"}
                 results = self.model(**model_inputs)
-                running_loss += dft_loss(results.logits, labels).item()
+                running_loss += ce_loss(results.logits, labels).item()
                 running_entropy += self.compute_entropy(results.logits, labels).item()
 
         # gather across GPUs so all processes have the same avg
@@ -355,15 +355,9 @@ class SFTTrainer:
             labels = batch["labels"]
             model_inputs = {k: v for k, v in batch.items() if k != "labels"}
 
-            # CE warmup: bootstrap probability mass for newly added special tokens
-            # (<think>/<answer>) before DFT's p-weighted gradient takes over —
-            # DFT alone cannot lift a token whose probability starts at ~0.
-            in_ce_warmup = global_step < self.train_cfg.ce_warmup_steps
-            loss_fn = ce_loss if in_ce_warmup else dft_loss
-
             with self.accelerator.autocast():
                 results = self.model(**model_inputs)
-                loss = loss_fn(results.logits, labels) / grad_accumulation
+                loss = ce_loss(results.logits, labels) / grad_accumulation
 
             self.accelerator.backward(loss)
             running_loss += loss.item() * grad_accumulation
@@ -406,9 +400,6 @@ class SFTTrainer:
                             "train/entropy": last_entropy,
                             "train/grad_norm": last_grad_norm,
                             "train/lr": self._get_lr(),
-                            # marks the CE->DFT boundary: loss values are not
-                            # comparable across the switch
-                            "train/ce_warmup": int(in_ce_warmup),
                             "epoch": epoch + 1,
                         },
                         step=global_step,
