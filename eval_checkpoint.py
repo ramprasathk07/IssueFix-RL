@@ -107,10 +107,15 @@ def check_format(text: str) -> dict:
     # nothing before <think>
     junk_before = text.strip().startswith("<think>") if has_think_open else False
 
-    # nothing after </answer>
+    # nothing meaningful after </answer> — ignore trailing special/control
+    # tokens (<|im_end|>, <|endoftext|>). The model correctly emits <|im_end|>
+    # to stop, and it survives tokenizer.decode(skip_special_tokens=False), so
+    # a textbook <think>…</think><answer>…</answer><|im_end|> must not count as
+    # "junk after".
     after_ans = ""
     if has_ans_close:
-        after_ans = text.split("</answer>")[-1].strip()
+        tail = re.sub(r"<\|[^|]*\|>", "", text.split("</answer>")[-1])
+        after_ans = tail.strip()
     junk_after = bool(after_ans)
 
     # think comes before answer
@@ -215,7 +220,9 @@ def sep(char="-", n=70):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", default="checkpoints/checkpoint-kaggle-1")
-    parser.add_argument("--max_new_tokens", type=int, default=512)
+    parser.add_argument("--max_new_tokens", type=int, default=1024,
+                        help="512 truncated this model's verbose <think> mid-reasoning "
+                             "on ~5/8 tasks, before it reached <answer>")
     parser.add_argument("--exec_timeout", type=int, default=10,
                         help="Seconds before code execution is killed")
     parser.add_argument("--skip_exec", action="store_true",
