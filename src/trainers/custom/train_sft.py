@@ -334,46 +334,81 @@ class SFTTrainer:
 
     # ── validation ────────────────────────────────────────────────────────────
 
-    def validate(self, epoch: int, val_loader: DataLoader, global_step: int) -> float:
+    def validate(
+        self,
+        epoch: int,
+        val_loader: DataLoader,
+        global_step: int,
+        max_batches: int = 0,
+    ) -> float:
+        """
+        max_batches > 0 caps the number of val batches (used for cheap mid-epoch
+        checks); 0 runs the full set. Every rank must run the SAME count or the
+        gather below deadlocks, so the cap is a plain constant, never rank-derived.
+        """
+        was_training = self.model.training
         self.model.eval()
         running_loss = 0.0
         running_entropy = 0.0
+        n_batches = 0
 
         with torch.no_grad():
             for batch in val_loader:
+                if max_batches and n_batches >= max_batches:
+                    break
                 batch = {k: v.to(self.accelerator.device) for k, v in batch.items()}
                 labels = batch["labels"]
                 model_inputs = {k: v for k, v in batch.items() if k != "labels"}
                 results = self.model(**model_inputs)
                 running_loss += ce_loss(results.logits, labels).item()
                 running_entropy += self.compute_entropy(results.logits, labels).item()
+                n_batches += 1
 
+        denom = max(n_batches, 1)
         # gather across GPUs so all processes have the same avg
         avg_loss_t = self.accelerator.gather(
-            torch.tensor(running_loss / len(val_loader), device=self.accelerator.device)
+            torch.tensor(running_loss / denom, device=self.accelerator.device)
         ).mean().item()
         avg_entropy_t = self.accelerator.gather(
-            torch.tensor(running_entropy / len(val_loader), device=self.accelerator.device)
+            torch.tensor(running_entropy / denom, device=self.accelerator.device)
         ).mean().item()
 
         self._log(
-            {"val/loss": avg_loss_t, "val/entropy": avg_entropy_t, "epoch": epoch + 1},
+            {
+                "val/loss": avg_loss_t,
+                "val/entropy": avg_entropy_t,
+                # lets you tell a capped mid-epoch point from a full epoch-end one
+                "val/n_batches": n_batches,
+                "epoch": epoch + 1,
+            },
             step=global_step,
         )
+        scope = f"{n_batches} batches" if max_batches else "full"
         self.accelerator.print(
-            f"[val] epoch {epoch+1} | loss {avg_loss_t:.4f} | entropy {avg_entropy_t:.4f}"
+            f"[val] epoch {epoch+1} | step {global_step} | {scope} | "
+            f"loss {avg_loss_t:.4f} | entropy {avg_entropy_t:.4f}"
         )
+
+        # restore train mode — without this a mid-epoch call would leave the
+        # model in eval() (dropout off) for the rest of the epoch
+        if was_training:
+            self.model.train()
         return avg_loss_t
 
     # ── training loop ─────────────────────────────────────────────────────────
 
     def train_epoch(
-        self, epoch: int, train_loader: DataLoader, global_step: int
+        self,
+        epoch: int,
+        train_loader: DataLoader,
+        global_step: int,
+        val_loader: DataLoader | None = None,
     ) -> tuple[float, int]:
         grad_accumulation = self.train_cfg.gradient_accumulation_steps
         grad_clip = self.train_cfg.max_grad_norm
         log_interval = self.train_cfg.logging_steps
         save_steps = self.train_cfg.save_steps
+        eval_steps = self.train_cfg.eval_steps
 
         self.model.train()
         pbar = tqdm(
@@ -421,6 +456,24 @@ class SFTTrainer:
 
                 if global_step % save_steps == 0:
                     self.save_checkpoint(epoch, global_step)
+
+                # mid-epoch validation — without this, val/* is logged only at
+                # epoch boundaries (2 points for a 2-epoch run, and just 1 if the
+                # session hits the Kaggle wall mid-epoch), which is invisible on
+                # a chart. Capped by eval_max_batches: a full pass costs ~4
+                # training steps. All ranks hit this together — global_step is
+                # rank-invariant — so the gather inside validate() stays aligned.
+                if (
+                    eval_steps
+                    and val_loader is not None
+                    and global_step % eval_steps == 0
+                ):
+                    self.validate(
+                        epoch,
+                        val_loader,
+                        global_step,
+                        max_batches=self.train_cfg.eval_max_batches,
+                    )
 
                 # log at optimizer-step granularity — guarantees monotonically increasing
                 # wandb step and avoids duplicate step values that silently stop chart updates
@@ -533,7 +586,11 @@ class SFTTrainer:
         best_checkpoint_path: Path | None = None
 
         for epoch in range(start_epoch, self.train_cfg.num_epochs):
-            avg_train_loss, global_step = self.train_epoch(epoch, train_loader, global_step)
+            avg_train_loss, global_step = self.train_epoch(
+                epoch, train_loader, global_step, val_loader=val_loader
+            )
+            # epoch-boundary pass is always FULL (uncapped) — this is the number
+            # best-checkpoint selection uses
             avg_val_loss = self.validate(epoch, val_loader, global_step)
             ckpt = self.save_checkpoint(epoch, global_step)
 

@@ -56,7 +56,14 @@ class TrainingParams(BaseModel):
     gradient_checkpointing: bool = False
     logging_steps: int = 10
     save_steps: int = 500
+    # run validation every N optimizer steps mid-epoch (0 disables mid-epoch
+    # validation, leaving only the full pass at each epoch boundary)
     eval_steps: int = 100
+    # cap batches for MID-EPOCH validation only; the epoch-boundary pass is
+    # always full. A full pass costs ~14 min on 2xT4 (~4 training steps), so
+    # uncapped mid-epoch eval would add ~14% overhead at eval_steps=100.
+    # 0 = uncapped.
+    eval_max_batches: int = Field(default=100, ge=0)
     output_dir: str = "./outputs"
     save_best_k: int = Field(default=2, ge=1)  # keep only top-k epoch checkpoints by val loss
     wandb_project: Optional[str] = None

@@ -78,7 +78,11 @@ training_params:
   output_dir: "./outputs/sft_run1"
   logging_steps: 10
   save_steps: 150                       # mid-epoch resume checkpoint (only latest kept)
-  eval_steps: 100
+  eval_steps: 50                        # mid-epoch validation cadence. Was declared but NEVER READ
+                                        # until 2026-08-13 — val/* only logged at epoch boundaries, so
+                                        # run r01xak3m produced a single val point (invisible on a chart).
+  eval_max_batches: 100                 # caps MID-EPOCH val only (epoch-end pass stays full).
+                                        # A full pass ~= 857s on 2xT4 (~4 training steps); 100 batches ~= 90s.
   save_best_k: 2                        # keep only the 2 best epoch checkpoints (lowest val loss)
   wandb_project: "my_sft_project_v4"    # fresh project — v3 has 12 runs from the DFT-lockout debugging cycle
   wandb_run_name: "qwen0.5_sft_10k_ce_sl3584"
