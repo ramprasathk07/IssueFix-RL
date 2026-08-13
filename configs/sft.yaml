@@ -40,9 +40,10 @@ model_params:
 # ========== DataLoader Parameters ==========
 dataloader_params:
   batch_size: 1                         # per-GPU; bs=2 @ ml=6000 and bs=1 @ ml=5000 both OOM on 15GB T4 (verified 2026-07-04)
-  max_length: 3584                      # ml=4096 OOM'd on one of two identical runs (dxjxtj8v crashed <10 steps,
-                                        # xvf3e52l survived to step 200) — right on the memory edge; 3584 adds margin
-  drop_overlong: true                   # drop the ~26% of samples >3584 tok instead of truncating (truncation strips EOS)
+  max_length: 4096                      # NOTE: ml=4096 OOM'd on one of two identical runs (dxjxtj8v crashed <10 steps,
+                                        # xvf3e52l survived to step 200) — right on the memory edge. 3584 adds margin
+                                        # and was the last verified-stable value; revert here if a fresh Kaggle run OOMs.
+  drop_overlong: true                   # drop the ~14% of samples >4096 tok instead of truncating (truncation strips EOS)
   shuffle: true
   num_workers: 2                        # Kaggle is CPU-limited
   prefetch_factor: 2
@@ -60,9 +61,11 @@ training_params:
   max_grad_norm: 1.0
 
   # Training loop
-  num_epochs: 2                        # ~92 steps/epoch after drop_overlong; 3 epochs risks the 12h Kaggle cap
-                                       # (nothing gets pushed if the session is killed) — resume epoch 3 next session
-  gradient_accumulation_steps: 32      # effective batch = batch_size 1 * 2 GPUs * 32 = 64
+  num_epochs: 2                        # ~216 steps/epoch at ml=4096/grad_accum=16 (was ~92 at the previous
+                                       # ml=3584/grad_accum=32 settings — recompute if either changes again).
+                                       # 3 epochs risks the 12h Kaggle cap (nothing gets pushed if the session
+                                       # is killed) — resume epoch 3 next session
+  gradient_accumulation_steps: 16      # effective batch = batch_size 1 * 2 GPUs * 16 = 32
   num_gpus: 2
 
   # Mixed precision & performance

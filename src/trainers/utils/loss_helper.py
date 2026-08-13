@@ -91,7 +91,7 @@ def ce_loss(logits, labels, num_items_in_batch=None):
     logprobs = selective_log_softmax(logits, shift_labels)
     per_token_loss = -logprobs
     if num_items_in_batch is None:
-        num_items_in_batch = loss_mask.sum()
+        num_items_in_batch = loss_mask.sum().clamp(min=1)
     loss = (per_token_loss * loss_mask).sum() / num_items_in_batch
     return loss
 
@@ -110,6 +110,6 @@ def dft_loss(logits, labels, num_items_in_batch=None):
     logprobs = selective_log_softmax(logits, shift_labels)
     per_token_loss = -logprobs.exp().detach() * logprobs
     if num_items_in_batch is None:
-        num_items_in_batch = loss_mask.sum()
+        num_items_in_batch = loss_mask.sum().clamp(min=1)
     loss = (per_token_loss * loss_mask).sum() / num_items_in_batch
     return loss

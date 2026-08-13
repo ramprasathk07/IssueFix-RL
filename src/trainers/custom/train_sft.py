@@ -26,7 +26,6 @@ from configs import Config
 
 _TRAINING_STATE_FILE = "training_state.pt"
 
-
 class SFTTrainer:
     def __init__(self, cfg: Config):
         self.train_cfg = cfg.training_params
@@ -95,7 +94,6 @@ class SFTTrainer:
             self.add_special_tokens()
 
     # ── optimizer / scheduler ─────────────────────────────────────────────────
-
     def _setup_optimizer(self):
         if self.train_cfg.optimizer == "adamw_8bit":
             try:
@@ -293,6 +291,47 @@ class SFTTrainer:
         self.accelerator.print(f"Resumed from epoch {epoch+1}, global_step {global_step}")
         return epoch + 1, global_step
 
+    # ── data splitting ───────────────────────────────────────────────────────
+
+    def _group_split(
+        self, data: list[dict], val_frac: float = 0.2, seed: int = 42
+    ) -> tuple[list[dict], list[dict]]:
+        """
+        Split by unique prompt, not by row. OpenCodeReasoning ships multiple
+        solutions per problem (10k rows / ~3.7k unique problems); a row-level
+        split let 87.8% of val rows share a problem with train, so every
+        val-loss number in this project's history measured memorization, not
+        generalization. Whole problems go to one side only.
+        """
+        groups: dict[str, list[dict]] = {}
+        for item in data:
+            groups.setdefault(item.get("prompt", ""), []).append(item)
+
+        keys = list(groups.keys())
+        rng = random.Random(seed)
+        rng.shuffle(keys)
+
+        target_val = int(val_frac * len(data))
+        val_data: list[dict] = []
+        train_data: list[dict] = []
+        for key in keys:
+            group = groups[key]
+            if len(val_data) < target_val:
+                val_data.extend(group)
+            else:
+                train_data.extend(group)
+
+        train_prompts = {item.get("prompt", "") for item in train_data}
+        val_prompts = {item.get("prompt", "") for item in val_data}
+        overlap = train_prompts & val_prompts
+        assert not overlap, f"group split leaked {len(overlap)} prompts across train/val"
+
+        self.accelerator.print(
+            f"[split] {len(groups)} unique prompts -> "
+            f"{len(train_data)} train rows / {len(val_data)} val rows | zero prompt overlap"
+        )
+        return train_data, val_data
+
     # ── validation ────────────────────────────────────────────────────────────
 
     def validate(self, epoch: int, val_loader: DataLoader, global_step: int) -> float:
@@ -425,11 +464,7 @@ class SFTTrainer:
             for line in f:
                 data.append(json.loads(line))
 
-        random.seed(42)
-        random.shuffle(data)
-
-        split = int(0.8 * len(data))
-        train_data, val_data = data[:split], data[split:]
+        train_data, val_data = self._group_split(data, val_frac=0.2, seed=42)
 
         # data sanity: catch wrong-file mistakes (missing tags, truncated responses)
         # before spending GPU-hours

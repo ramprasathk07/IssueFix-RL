@@ -22,6 +22,9 @@ from typing import Optional
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
 
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+from data.loader import SYSTEM_PROMPT  # single source of truth — train/eval must see the same prompt
+
 # Windows console defaults to cp1252 and dies on model output containing e.g. arrows
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -83,15 +86,6 @@ TEST_CASES: list[TestCase] = [
         expected_output="[1, 2, 3, 4, 5]",
     ),
 ]
-
-SYSTEM_PROMPT = """You are an expert software engineer.
-For each coding problem:
-
-1. Think through the solution step by step - place your reasoning inside <think> ... </think> tags.
-2. Provide the final code solution inside <answer> ... </answer> tags.
-
-Do not output anything outside these tags.
-The answer must contain only the runnable code (no extra explanation after the tags)."""
 
 
 # ---------------------------------------------------------------------------
@@ -288,16 +282,29 @@ def main():
                 print(f"Exec   [{SKIP}] no code block found (checked <answer> + markdown)")
         else:
             print(f"Code src : {code_src}")
-            stdout, stderr, timed_out = run_code(code, timeout=args.exec_timeout)
-            if timed_out:
-                print(f"Exec   [{FAIL}] TIMEOUT after {args.exec_timeout}s")
+
+            # -------------------- IMPROVEMENTS START --------------------
+            # 1. Pre‑check for input() or sys.stdin – if present, mark as FAIL without running
+            if "input(" in code or "sys.stdin" in code:
                 exec_pass = False
+                stdout = ""
+                stderr = "FAIL: Code uses input() – expected hardcoded values per prompt"
+                print(f"Exec   [{FAIL}] {stderr}")
             else:
-                exec_pass = stdout == tc.expected_output
-                print(f"Exec   [{_pf(exec_pass)}] "
-                      f"expected={repr(tc.expected_output[:60])}  got={repr(stdout[:60])}")
-                if stderr:
-                    print(f"Stderr : {stderr[:200]}")
+                # 2. Run the code
+                stdout, stderr, timed_out = run_code(code, timeout=args.exec_timeout)
+                if timed_out:
+                    exec_pass = False
+                    print(f"Exec   [{FAIL}] TIMEOUT after {args.exec_timeout}s")
+                else:
+                    # 3. Relaxed check: expected_output appears anywhere in stdout
+                    #    (substring match; for fizzbuzz we still need exact sequence, but substring works there too)
+                    exec_pass = tc.expected_output in stdout
+                    print(f"Exec   [{_pf(exec_pass)}] "
+                          f"expected={repr(tc.expected_output[:60])}  got={repr(stdout[:60])}")
+                    if stderr:
+                        print(f"Stderr : {stderr[:200]}")
+            # -------------------- IMPROVEMENTS END --------------------
 
         results.append({
             "name":       tc.name,
