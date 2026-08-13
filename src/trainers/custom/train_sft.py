@@ -14,6 +14,7 @@ import sys
 import json
 import time
 import random
+import shutil
 import zipfile
 import subprocess
 from tqdm import tqdm
@@ -35,6 +36,9 @@ class SFTTrainer:
         self._wandb = None
         self._mlflow = None
         self._mlflow_run = None
+        # checkpoint retention bookkeeping (main process only)
+        self._epoch_ckpts: list[tuple[float, Path]] = []  # (val_loss, path), best-k retained
+        self._last_mid_ckpt: Path | None = None           # rolling mid-epoch resume point
 
         mixed_precision = (
             "bf16" if self.train_cfg.bf16 else ("fp16" if self.train_cfg.fp16 else "no")
@@ -218,6 +222,74 @@ class SFTTrainer:
 
         print(f"Checkpoint saved → {out}")
         return out
+
+    # ── checkpoint retention ──────────────────────────────────────────────────
+
+    def _safe_rmtree(self, path: Path, protected: set[Path]) -> bool:
+        """
+        Delete a checkpoint dir, refusing anything that isn't provably one of ours.
+        Multi-GB deletes on a shared Kaggle disk — every guard here is load-bearing.
+        """
+        out_root = Path(self.train_cfg.output_dir).resolve()
+        try:
+            p = Path(path).resolve()
+        except OSError:
+            return False
+
+        if p in {q.resolve() for q in protected if q is not None}:
+            return False                                   # never drop best / in-use
+        if not p.is_dir():
+            return False
+        if out_root not in p.parents:
+            print(f"[prune] refusing to delete outside output_dir: {p}")
+            return False
+        if not p.name.startswith("checkpoint-"):
+            print(f"[prune] refusing to delete non-checkpoint dir: {p}")
+            return False
+
+        shutil.rmtree(p, ignore_errors=True)
+        print(f"[prune] removed {p.name}")
+        return True
+
+    def _retain_mid_epoch_checkpoint(self, ckpt: Path | None):
+        """
+        Mid-epoch saves are rolling resume points — keep only the newest.
+        Protects the epoch (best-k) checkpoints, never the one being replaced.
+        """
+        if not self.accelerator.is_main_process or ckpt is None:
+            return
+        prev = self._last_mid_ckpt
+        self._last_mid_ckpt = ckpt
+        if prev is not None and prev != ckpt:
+            self._safe_rmtree(prev, protected={p for _, p in self._epoch_ckpts})
+
+    def _retain_best_k_checkpoints(
+        self, ckpt: Path | None, val_loss: float, best_path: Path | None
+    ):
+        """
+        Keep the save_best_k epoch checkpoints with the lowest val loss.
+        Protects the live resume point and best_path — the latter is what gets
+        zipped and pushed after the loop. (best_path always sorts into `keep`
+        for k>=1 since it is the lowest loss seen; the guard is belt-and-braces.)
+        """
+        if not self.accelerator.is_main_process or ckpt is None:
+            return
+        self._epoch_ckpts.append((val_loss, ckpt))
+        k = max(self.train_cfg.save_best_k, 1)
+        if len(self._epoch_ckpts) <= k:
+            return
+
+        protected: set[Path] = set()
+        if best_path is not None:
+            protected.add(best_path)
+        if self._last_mid_ckpt is not None:
+            protected.add(self._last_mid_ckpt)
+
+        ranked = sorted(self._epoch_ckpts, key=lambda pair: pair[0])  # ascending loss
+        keep, drop = ranked[:k], ranked[k:]
+        for _, path in drop:
+            self._safe_rmtree(path, protected)
+        self._epoch_ckpts = keep
 
     def _zip_best_checkpoint(self, checkpoint_path: Path | None):
         if not self.accelerator.is_main_process or checkpoint_path is None:
@@ -455,7 +527,10 @@ class SFTTrainer:
                     last_entropy = self.compute_entropy(results.logits, labels).item()
 
                 if global_step % save_steps == 0:
-                    self.save_checkpoint(epoch, global_step)
+                    mid_ckpt = self.save_checkpoint(epoch, global_step)
+                    # rolling resume point — drop the previous one so mid-epoch
+                    # saves don't accumulate (~2GB each) and fill the Kaggle disk
+                    self._retain_mid_epoch_checkpoint(mid_ckpt)
 
                 # mid-epoch validation — without this, val/* is logged only at
                 # epoch boundaries (2 points for a 2-epoch run, and just 1 if the
@@ -598,6 +673,11 @@ class SFTTrainer:
                 best_val_loss = avg_val_loss
                 best_checkpoint_path = ckpt
                 self.accelerator.print(f"New best val_loss {best_val_loss:.4f} → {ckpt}")
+
+            # prune AFTER best-tracking updates, and protect the best explicitly:
+            # best_checkpoint_path is what gets zipped and pushed to Kaggle Models
+            # once the loop ends, so it must survive pruning.
+            self._retain_best_k_checkpoints(ckpt, avg_val_loss, best_checkpoint_path)
 
             self.accelerator.print(
                 f"Epoch {epoch+1} complete | "
