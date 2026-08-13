@@ -10,6 +10,9 @@ Multi-GPU (accelerate launch):
 
 Resume:
     accelerate launch --num_processes 2 train.py --resume outputs/sft_run1/checkpoint-epoch1-step150
+
+Override wandb project/run name without editing configs/sft.yaml:
+    python train.py --wandb_run_name qwen0.5_sft_run2 --wandb_project my_sft_project_v5
 """
 import argparse
 import os
@@ -45,18 +48,48 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to checkpoint dir to resume from",
     )
+    parser.add_argument(
+        "--wandb_project",
+        type=str,
+        default=None,
+        help="Override training_params.wandb_project from the config",
+    )
+    parser.add_argument(
+        "--wandb_run_name",
+        type=str,
+        default=None,
+        help="Override training_params.wandb_run_name from the config",
+    )
     return parser.parse_args()
 
 
-def train(config_path: str, data_path: str, resume: str | None = None):
+def train(
+    config_path: str,
+    data_path: str,
+    resume: str | None = None,
+    wandb_project: str | None = None,
+    wandb_run_name: str | None = None,
+):
     with open(config_path, "r", encoding="utf-8") as f:
         cfg_dict = yaml.safe_load(f)
+    if wandb_project is not None:
+        cfg_dict["training_params"]["wandb_project"] = wandb_project
+    if wandb_run_name is not None:
+        cfg_dict["training_params"]["wandb_run_name"] = wandb_run_name
     config = Config(**cfg_dict)
     trainer = SFTTrainer(config)
     trainer(data_path, resume_from=resume)
 
 
-def _spawn_worker(rank: int, world_size: int, config_path: str, data_path: str, resume: str | None):
+def _spawn_worker(
+    rank: int,
+    world_size: int,
+    config_path: str,
+    data_path: str,
+    resume: str | None,
+    wandb_project: str | None,
+    wandb_run_name: str | None,
+):
     # Set distributed env vars before Accelerator is created — it reads these to init process group
     os.environ.update({
         "RANK": str(rank),
@@ -66,7 +99,7 @@ def _spawn_worker(rank: int, world_size: int, config_path: str, data_path: str, 
         "MASTER_PORT": "29500",
         "PYTORCH_ALLOC_CONF": "expandable_segments:True",
     })
-    train(config_path, data_path, resume)
+    train(config_path, data_path, resume, wandb_project, wandb_run_name)
 
 
 def main() -> None:
@@ -78,18 +111,18 @@ def main() -> None:
 
     if os.environ.get("WORLD_SIZE"):
         # already launched via `accelerate launch` — env vars already set, run directly
-        train(args.config, args.data, args.resume)
+        train(args.config, args.data, args.resume, args.wandb_project, args.wandb_run_name)
     elif num_gpus > 1:
         # mp.spawn uses 'spawn' start method — safe with CUDA, works from notebook cells
         # notebook_launcher uses 'fork' which raises RuntimeError with CUDA
         mp.spawn(
             _spawn_worker,
-            args=(num_gpus, args.config, args.data, args.resume),
+            args=(num_gpus, args.config, args.data, args.resume, args.wandb_project, args.wandb_run_name),
             nprocs=num_gpus,
             join=True,
         )
     else:
-        train(args.config, args.data, args.resume)
+        train(args.config, args.data, args.resume, args.wandb_project, args.wandb_run_name)
 
 
 if __name__ == "__main__":
