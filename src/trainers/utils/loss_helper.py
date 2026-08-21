@@ -95,6 +95,19 @@ def ce_loss(logits, labels, num_items_in_batch=None):
     loss = (per_token_loss * loss_mask).sum() / num_items_in_batch
     return loss
 
+def token_accuracy(logits, labels) -> torch.Tensor:
+    """
+    Top-1 next-token prediction accuracy over response tokens. Mirrors ce_loss's
+    shift (labels are position-aligned with input_ids, not pre-shifted).
+    """
+    labels = nn.functional.pad(labels, (0, 1), value=-100)
+    shift_labels = labels[..., 1:].contiguous()
+    loss_mask = shift_labels != -100
+    preds = logits.argmax(dim=-1)
+    correct = (preds == shift_labels) & loss_mask
+    return correct.sum().float() / loss_mask.sum().clamp(min=1)
+
+
 def dft_loss(logits, labels, num_items_in_batch=None):
     """
     DFT loss function, as presented in [On the Generalization of SFT: A Reinforcement Learning Perspective with Reward

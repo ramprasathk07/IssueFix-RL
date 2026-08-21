@@ -12,6 +12,7 @@ from accelerate import Accelerator
 from pathlib import Path
 import sys
 import json
+import math
 import time
 import random
 import shutil
@@ -22,8 +23,10 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from data import create_sft_dataloader
-from trainers.utils import ce_loss, entropy_from_logits
+from trainers.utils import ce_loss, entropy_from_logits, token_accuracy
 from configs import Config
+
+_MAX_PPL_LOSS = 20.0  # clamp before exp() — avoids inf spikes early in training (post-resize embeddings)
 
 _TRAINING_STATE_FILE = "training_state.pt"
 
@@ -199,6 +202,25 @@ class SFTTrainer:
         entropy = entropy_from_logits(logits)
         mask = labels != -100
         return (entropy * mask).sum() / mask.sum().clamp(min=1)
+
+    def compute_token_accuracy(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        return token_accuracy(logits, labels)
+
+    @staticmethod
+    def _perplexity(loss: float) -> float:
+        return math.exp(min(loss, _MAX_PPL_LOSS))
+
+    def _gpu_mem_stats(self) -> tuple[float, float]:
+        """Peak alloc/reserved GB since the last reset, gathered as worst-case across ranks."""
+        if not torch.cuda.is_available():
+            return 0.0, 0.0
+        device = self.accelerator.device
+        alloc = torch.tensor(torch.cuda.max_memory_allocated(device) / 1e9, device=device)
+        reserved = torch.tensor(torch.cuda.max_memory_reserved(device) / 1e9, device=device)
+        alloc = self.accelerator.gather(alloc).max().item()
+        reserved = self.accelerator.gather(reserved).max().item()
+        torch.cuda.reset_peak_memory_stats(device)
+        return alloc, reserved
 
     # ── checkpointing ─────────────────────────────────────────────────────────
 
@@ -432,6 +454,7 @@ class SFTTrainer:
         self.model.eval()
         running_loss = 0.0
         running_entropy = 0.0
+        running_token_acc = 0.0
         n_batches = 0
 
         with torch.no_grad():
@@ -444,6 +467,7 @@ class SFTTrainer:
                 results = self.model(**model_inputs)
                 running_loss += ce_loss(results.logits, labels).item()
                 running_entropy += self.compute_entropy(results.logits, labels).item()
+                running_token_acc += self.compute_token_accuracy(results.logits, labels).item()
                 n_batches += 1
 
         denom = max(n_batches, 1)
@@ -454,11 +478,18 @@ class SFTTrainer:
         avg_entropy_t = self.accelerator.gather(
             torch.tensor(running_entropy / denom, device=self.accelerator.device)
         ).mean().item()
+        avg_token_acc_t = self.accelerator.gather(
+            torch.tensor(running_token_acc / denom, device=self.accelerator.device)
+        ).mean().item()
 
         self._log(
             {
                 "val/loss": avg_loss_t,
+                # ce_loss is already token-mean NLL — alias kept for readability
+                "val/nll": avg_loss_t,
+                "val/perplexity": self._perplexity(avg_loss_t),
                 "val/entropy": avg_entropy_t,
+                "val/token_acc": avg_token_acc_t,
                 # lets you tell a capped mid-epoch point from a full epoch-end one
                 "val/n_batches": n_batches,
                 "epoch": epoch + 1,
@@ -468,7 +499,8 @@ class SFTTrainer:
         scope = f"{n_batches} batches" if max_batches else "full"
         self.accelerator.print(
             f"[val] epoch {epoch+1} | step {global_step} | {scope} | "
-            f"loss {avg_loss_t:.4f} | entropy {avg_entropy_t:.4f}"
+            f"loss {avg_loss_t:.4f} | ppl {self._perplexity(avg_loss_t):.2f} | "
+            f"entropy {avg_entropy_t:.4f} | token_acc {avg_token_acc_t:.4f}"
         )
 
         # restore train mode — without this a mid-epoch call would leave the
@@ -500,16 +532,23 @@ class SFTTrainer:
             disable=not self.accelerator.is_main_process,
         )
 
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.accelerator.device)
+
         running_loss = 0.0
         last_grad_norm = 0.0
         last_entropy = 0.0
+        last_token_acc = 0.0
+        tokens_since_log = 0
         start_time = time.time()
+        last_log_time = start_time
         self.optimizer.zero_grad(set_to_none=True)
 
         for batch_idx, batch in enumerate(pbar):
             batch = {k: v.to(self.accelerator.device) for k, v in batch.items()}
             labels = batch["labels"]
             model_inputs = {k: v for k, v in batch.items() if k != "labels"}
+            tokens_since_log += batch["attention_mask"].sum().item()
 
             with self.accelerator.autocast():
                 results = self.model(**model_inputs)
@@ -532,9 +571,10 @@ class SFTTrainer:
                 self.optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
-                # compute entropy at optimizer step so it's always fresh
+                # compute entropy/accuracy at optimizer step so they're always fresh
                 with torch.no_grad():
                     last_entropy = self.compute_entropy(results.logits, labels).item()
+                    last_token_acc = self.compute_token_accuracy(results.logits, labels).item()
 
                 if global_step % save_steps == 0:
                     mid_ckpt = self.save_checkpoint(epoch, global_step)
@@ -562,25 +602,49 @@ class SFTTrainer:
 
                 # log at optimizer-step granularity — guarantees monotonically increasing
                 # wandb step and avoids duplicate step values that silently stop chart updates
-                if global_step % log_interval == 0 and self.accelerator.is_main_process:
-                    elapsed = time.time() - start_time
-                    current_loss = running_loss / (batch_idx + 1)
-                    self.accelerator.print(
-                        f"[train] epoch {epoch+1} | step {global_step} | "
-                        f"loss {current_loss:.4f} | entropy {last_entropy:.4f} | "
-                        f"grad_norm {last_grad_norm:.3f} | lr {self._get_lr():.2e} | "
-                        f"elapsed {elapsed:.1f}s"
-                    )
-                    self._log(
-                        {
-                            "train/loss": current_loss,
-                            "train/entropy": last_entropy,
-                            "train/grad_norm": last_grad_norm,
-                            "train/lr": self._get_lr(),
-                            "epoch": epoch + 1,
-                        },
-                        step=global_step,
-                    )
+                if global_step % log_interval == 0:
+                    # gpu-mem and token-throughput are collective (accelerator.gather) —
+                    # every rank must call these, so they sit OUTSIDE the
+                    # is_main_process gate below or the gather deadlocks on multi-GPU
+                    gpu_alloc_gb, gpu_reserved_gb = self._gpu_mem_stats()
+                    tokens_t = self.accelerator.gather(
+                        torch.tensor(float(tokens_since_log), device=self.accelerator.device)
+                    ).sum().item()
+
+                    if self.accelerator.is_main_process:
+                        elapsed = time.time() - start_time
+                        window = max(time.time() - last_log_time, 1e-6)
+                        current_loss = running_loss / (batch_idx + 1)
+                        tokens_per_sec = tokens_t / window
+                        self.accelerator.print(
+                            f"[train] epoch {epoch+1} | step {global_step} | "
+                            f"loss {current_loss:.4f} | ppl {self._perplexity(current_loss):.2f} | "
+                            f"entropy {last_entropy:.4f} | token_acc {last_token_acc:.4f} | "
+                            f"grad_norm {last_grad_norm:.3f} | lr {self._get_lr():.2e} | "
+                            f"tok/s {tokens_per_sec:.0f} | gpu_mem {gpu_alloc_gb:.1f}GB | "
+                            f"elapsed {elapsed:.1f}s"
+                        )
+                        self._log(
+                            {
+                                "train/loss": current_loss,
+                                # ce_loss is already token-mean NLL — alias kept for readability
+                                "train/nll": current_loss,
+                                "train/perplexity": self._perplexity(current_loss),
+                                "train/entropy": last_entropy,
+                                "train/token_acc": last_token_acc,
+                                "train/grad_norm": last_grad_norm,
+                                "train/lr": self._get_lr(),
+                                "train/tokens_per_sec": tokens_per_sec,
+                                "train/gpu_mem_alloc_gb": gpu_alloc_gb,
+                                "train/gpu_mem_reserved_gb": gpu_reserved_gb,
+                                "epoch": epoch + 1,
+                            },
+                            step=global_step,
+                        )
+
+                    # reset on every rank — tokens_since_log feeds the next window's gather
+                    tokens_since_log = 0
+                    last_log_time = time.time()
 
             if self.accelerator.is_main_process:
                 pbar.set_postfix(
