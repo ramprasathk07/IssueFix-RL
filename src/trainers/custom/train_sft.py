@@ -36,6 +36,7 @@ class SFTTrainer:
         self._wandb = None
         self._mlflow = None
         self._mlflow_run = None
+        self._resume_wandb_id: str | None = None
         # checkpoint retention bookkeeping (main process only)
         self._epoch_ckpts: list[tuple[float, Path]] = []  # (val_loss, path), best-k retained
         self._last_mid_ckpt: Path | None = None           # rolling mid-epoch resume point
@@ -148,6 +149,13 @@ class SFTTrainer:
                     **self.data_cfg.model_dump(),
                     "num_gpus": self.accelerator.num_processes,
                 },
+                # resume the SAME run across Kaggle sessions — Kaggle's 12h wall
+                # forces multi-session runs, and without id=/resume= every
+                # resumed session opened a brand-new run, so anything logged
+                # after the first session (including most val/* points) landed
+                # on a run the user never had open.
+                id=self._resume_wandb_id,
+                resume="allow" if self._resume_wandb_id else None,
             )
             self._wandb = wandb
         except ImportError:
@@ -211,6 +219,7 @@ class SFTTrainer:
                 "global_step": global_step,
                 "optimizer_state_dict": self.optimizer.state_dict(),
                 "scheduler_state_dict": self.scheduler.state_dict() if self.scheduler else None,
+                "wandb_run_id": self._wandb.run.id if self._wandb and self._wandb.run else None,
             },
             out / _TRAINING_STATE_FILE,
         )
@@ -360,6 +369,7 @@ class SFTTrainer:
         self.optimizer.load_state_dict(state["optimizer_state_dict"])
         epoch = state["epoch"]
         global_step = state["global_step"]
+        self._resume_wandb_id = state.get("wandb_run_id")
         self.accelerator.print(f"Resumed from epoch {epoch+1}, global_step {global_step}")
         return epoch + 1, global_step
 
