@@ -205,3 +205,41 @@ Each line in the `.jsonl` file must have `prompt` and `response` keys:
 ```
 
 The model is trained to produce responses wrapped in `<think>` (reasoning) and `<answer>` (code) tags.
+
+### On-policy self-distillation (dual T4)
+
+OPSD uses the student's problem-only rollout as the training trajectory, while a
+frozen copy of the same base model scores those tokens with access to the row's
+verified `solution` (falling back to `response`). The supplied preset places the
+LoRA student on GPU 0 and a 4-bit teacher on GPU 1:
+
+```bash
+pip install -r requirements.txt
+python train.py --method opsd --config configs/opsd.yaml \
+  --data datasets/processed/opencode_sft_filtered.jsonl
+```
+
+Run this as a normal Python process, not through `accelerate launch`: the trainer
+owns both GPUs itself. Useful command-line overrides are
+`--max_completion_length`, `--top_k_loss`, `--student_device`, and
+`--teacher_device`. Checkpoints contain the trainable LoRA adapter and can be
+continued with `--resume <checkpoint-directory>`.
+
+Choose the student update strategy with `--finetuning lora` or
+`--finetuning full`. Full mode keeps the teacher frozen, updates every student
+weight, and requires `model_params.load_in_4bit: false`.
+
+### GRPO
+
+The GRPO path uses four on-policy completions per prompt and combines response
+format, Python syntax, and verified-solution similarity rewards. Generated code
+is parsed but never executed:
+
+```bash
+python train.py --method grpo --finetuning lora \
+  --config configs/grpo.yaml \
+  --data datasets/processed/opencode_sft_filtered.jsonl
+```
+
+On a dual-T4 machine, `train.py` launches two DDP workers automatically. The
+effective batch size must remain divisible by `grpo_params.num_generations`.

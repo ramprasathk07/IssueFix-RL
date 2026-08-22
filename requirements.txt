@@ -12,6 +12,7 @@ bitsandbytes>=0.43.0
 peft>=0.10.0
 tqdm>=4.66.0
 accelerate>=0.27.0
+trl==1.9.2
 
 # Logging & experiment tracking (optional)
 wandb>=0.17.0

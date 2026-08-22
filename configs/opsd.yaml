@@ -1,0 +1,71 @@
+# OPSD for a Kaggle dual-T4 session. Launch as one process (not accelerate):
+# python train.py --method opsd --config configs/opsd.yaml --data <file.jsonl>
+model_params:
+  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  model_type: "AutoModelForCausalLM"
+  trust_remote_code: true
+
+  # The student is small enough to keep in fp16 on a 15 GB T4. Enable this for
+  # a larger model; LoRA remains the only trainable part either way.
+  load_in_8bit: false
+  load_in_4bit: false
+  bnb_4bit_compute_dtype: "float16"
+  bnb_4bit_quant_type: "nf4"
+  bnb_4bit_use_double_quant: true
+  # Override without editing this file via --finetuning lora|full.
+  # Full mode requires load_in_4bit: false.
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  lora_target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+dataloader_params:
+  batch_size: 1
+  max_length: 4096
+  shuffle: true
+  num_workers: 0
+  prefetch_factor: 2
+  pin_memory: false
+  pre_tokenize: false
+
+training_params:
+  learning_rate: 2e-4
+  num_epochs: 1
+  fp16: true
+  bf16: false
+  tf32: false
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 16
+  warmup_steps: 50
+  lr_scheduler: "cosine"
+  optimizer: "adamw_8bit"
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 100
+  output_dir: "./outputs/opsd_run1"
+  wandb_project: "issuefix_opsd"
+  wandb_run_name: "qwen0.5_opsd_lora_dual_t4"
+  num_gpus: 2
+
+opsd_params:
+  student_device: "cuda:0"
+  teacher_device: "cuda:1"
+  max_prompt_length: 3072
+  max_completion_length: 512
+  temperature: 1.0
+  top_p: 1.0
+  top_k_loss: 32
+  jsd_beta: 0.5
+  token_clip: 0.05
+  teacher_load_in_4bit: true
+  student_thinking: false
+  teacher_thinking: true
