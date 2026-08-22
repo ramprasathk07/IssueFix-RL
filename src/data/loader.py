@@ -181,6 +181,47 @@ def create_sft_dataloader(
         drop_last=drop_last,
     )
 
+
+class OPSDDataset(Dataset):
+    """Raw problem/reference pairs used to build two different OPSD contexts."""
+
+    def __init__(self, data: List[Dict[str, str]]):
+        self.data = []
+        for row in data:
+            problem = row.get("problem") or row.get("prompt")
+            solution = row.get("solution") or row.get("response")
+            if problem and solution:
+                self.data.append({"problem": str(problem), "solution": str(solution)})
+        if not self.data:
+            raise ValueError(
+                "No usable OPSD rows. Expected problem/prompt and solution/response fields."
+            )
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, idx: int) -> Dict[str, str]:
+        return self.data[idx]
+
+
+def create_opsd_dataloader(
+    data: List[Dict[str, str]], data_config: DataloaderParams
+) -> DataLoader:
+    """Create an OPSD loader; prompts are tokenized online before every rollout."""
+    if data_config.batch_size != 1:
+        raise ValueError(
+            "OPSD requires dataloader_params.batch_size=1 so generated completion "
+            "positions align in the student and teacher contexts."
+        )
+    return DataLoader(
+        OPSDDataset(data),
+        batch_size=1,
+        shuffle=data_config.shuffle,
+        collate_fn=lambda rows: rows[0],
+        num_workers=0,
+        pin_memory=False,
+    )
+
 if __name__ == "__main__":
     # 1. Load tokenizer (and model if needed)
     model_name = "Qwen/Qwen2.5-0.5B-Instruct"

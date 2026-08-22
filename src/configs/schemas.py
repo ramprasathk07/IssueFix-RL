@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, PositiveInt, ConfigDict
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 
 class DataloaderParams(BaseModel):
@@ -79,7 +79,50 @@ class TrainingParams(BaseModel):
     kaggle_model_license: str = "apache-2.0"
 
 
+class OPSDParams(BaseModel):
+    """Settings for a student on GPU 0 and frozen self-teacher on GPU 1."""
+
+    model_config = ConfigDict(extra="ignore")
+    teacher_device: str = "cuda:1"
+    student_device: str = "cuda:0"
+    max_prompt_length: PositiveInt = 2048
+    max_completion_length: PositiveInt = 512
+    temperature: float = Field(default=1.0, gt=0)
+    top_p: float = Field(default=1.0, gt=0, le=1)
+    top_k_loss: PositiveInt = 32
+    jsd_beta: float = Field(default=0.5, ge=0, le=1)
+    token_clip: float = Field(default=0.05, ge=0)
+    teacher_load_in_4bit: bool = True
+    student_thinking: bool = False
+    teacher_thinking: bool = True
+    system_prompt: Optional[str] = None
+
+
+class GRPOParams(BaseModel):
+    """Custom PyTorch GRPO rollout, objective, and reward settings."""
+
+    model_config = ConfigDict(extra="ignore")
+    num_generations: int = Field(default=4, ge=2)
+    max_prompt_length: PositiveInt = 2048
+    max_completion_length: PositiveInt = 512
+    forward_batch_size: PositiveInt = 1
+    temperature: float = Field(default=1.0, gt=0)
+    top_p: float = Field(default=1.0, gt=0, le=1)
+    beta: float = Field(default=0.0, ge=0)
+    epsilon: float = Field(default=0.2, gt=0)
+    advantage_epsilon: float = Field(default=1e-4, gt=0)
+    loss_type: Literal["grpo", "dapo"] = "dapo"
+    mask_truncated_completions: bool = True
+    format_reward_weight: float = Field(default=0.2, ge=0)
+    syntax_reward_weight: float = Field(default=0.2, ge=0)
+    reference_reward_weight: float = Field(default=0.6, ge=0)
+    log_completions: bool = True
+    seed: int = 42
+
+
 class Config(BaseModel):
     model_params: ModelParams
     dataloader_params: DataloaderParams
     training_params: TrainingParams
+    opsd_params: Optional[OPSDParams] = None
+    grpo_params: Optional[GRPOParams] = None
