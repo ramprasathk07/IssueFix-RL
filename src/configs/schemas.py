@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, PositiveInt, ConfigDict
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 
 class DataloaderParams(BaseModel):
@@ -99,22 +99,25 @@ class OPSDParams(BaseModel):
 
 
 class GRPOParams(BaseModel):
-    """TRL GRPO rollout and reward settings."""
+    """Custom PyTorch GRPO rollout, objective, and reward settings."""
 
     model_config = ConfigDict(extra="ignore")
-    num_generations: PositiveInt = 4
+    num_generations: int = Field(default=4, ge=2)
     max_prompt_length: PositiveInt = 2048
     max_completion_length: PositiveInt = 512
+    forward_batch_size: PositiveInt = 1
     temperature: float = Field(default=1.0, gt=0)
     top_p: float = Field(default=1.0, gt=0, le=1)
     beta: float = Field(default=0.0, ge=0)
     epsilon: float = Field(default=0.2, gt=0)
-    loss_type: str = "dapo"
+    advantage_epsilon: float = Field(default=1e-4, gt=0)
+    loss_type: Literal["grpo", "dapo"] = "dapo"
     mask_truncated_completions: bool = True
     format_reward_weight: float = Field(default=0.2, ge=0)
     syntax_reward_weight: float = Field(default=0.2, ge=0)
     reference_reward_weight: float = Field(default=0.6, ge=0)
     log_completions: bool = True
+    seed: int = 42
 
 
 class Config(BaseModel):

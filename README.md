@@ -231,9 +231,12 @@ weight, and requires `model_params.load_in_4bit: false`.
 
 ### GRPO
 
-The GRPO path uses four on-policy completions per prompt and combines response
-format, Python syntax, and verified-solution similarity rewards. Generated code
-is parsed but never executed:
+The repository-owned GRPO loop uses PyTorch for grouped rollouts, normalized
+advantages, the clipped policy objective, optional reference-policy KL, and
+checkpointing. Transformers, Accelerate, and PEFT provide model loading, DDP,
+mixed precision, and LoRA; TRL is not required. Four on-policy completions per
+prompt combine response-format, Python-syntax, and verified-solution-similarity
+rewards. Generated code is parsed but never executed:
 
 ```bash
 python train.py --method grpo --finetuning lora \
@@ -241,5 +244,7 @@ python train.py --method grpo --finetuning lora \
   --data datasets/processed/opencode_sft_filtered.jsonl
 ```
 
-On a dual-T4 machine, `train.py` launches two DDP workers automatically. The
-effective batch size must remain divisible by `grpo_params.num_generations`.
+On a dual-T4 machine, `train.py` launches two DDP workers automatically. Each
+prompt expands to `grpo_params.num_generations` completions. Keep
+`dataloader_params.batch_size` small and use `grpo_params.forward_batch_size`
+to bound the memory used while scoring completion tokens.

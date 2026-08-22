@@ -9,7 +9,8 @@ model_params:
   use_lora: true
   lora_r: 16
   lora_alpha: 32
-  lora_dropout: 0.05
+  # PPO-style likelihood ratios should be deterministic for a fixed sequence.
+  lora_dropout: 0.0
   lora_target_modules:
     - q_proj
     - k_proj
@@ -20,7 +21,9 @@ model_params:
     - down_proj
 
 dataloader_params:
-  batch_size: 2
+  # Prompts per GPU. Each prompt expands to num_generations rollouts; policy
+  # scoring is separately micro-batched by forward_batch_size below.
+  batch_size: 1
   max_length: 2048
   shuffle: true
   num_workers: 0
@@ -35,7 +38,7 @@ training_params:
   tf32: false
   weight_decay: 0.0
   max_grad_norm: 1.0
-  gradient_accumulation_steps: 1
+  gradient_accumulation_steps: 2
   warmup_steps: 25
   lr_scheduler: "cosine"
   optimizer: "adamw_8bit"
@@ -51,13 +54,16 @@ grpo_params:
   num_generations: 4
   max_prompt_length: 1536
   max_completion_length: 512
+  forward_batch_size: 1
   temperature: 1.0
   top_p: 1.0
   beta: 0.0
   epsilon: 0.2
+  advantage_epsilon: 1e-4
   loss_type: "dapo"
   mask_truncated_completions: true
   format_reward_weight: 0.2
   syntax_reward_weight: 0.2
   reference_reward_weight: 0.6
   log_completions: true
+  seed: 42

@@ -1,5 +1,5 @@
-# torch is pre-installed on Kaggle — install separately if running locally:
-#   pip install torch>=2.1.0
+# PyTorch is pre-installed on Kaggle, so this constraint is already satisfied there.
+torch>=2.1.0
 
 # Core
 transformers>=4.40.0
@@ -12,7 +12,6 @@ bitsandbytes>=0.43.0
 peft>=0.10.0
 tqdm>=4.66.0
 accelerate>=0.27.0
-trl==1.9.2
 
 # Logging & experiment tracking (optional)
 wandb>=0.17.0
