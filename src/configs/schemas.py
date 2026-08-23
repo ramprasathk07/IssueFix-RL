@@ -91,8 +91,8 @@ class OPSDParams(BaseModel):
     top_p: float = Field(default=1.0, gt=0, le=1)
     top_k_loss: PositiveInt = 32
     jsd_beta: float = Field(default=0.5, ge=0, le=1)
-    token_clip: float = Field(default=0.05, ge=0)
-    teacher_load_in_4bit: bool = True
+    token_clip: float = Field(default=1.0, ge=0)
+    teacher_load_in_4bit: bool = False
     student_thinking: bool = False
     teacher_thinking: bool = True
     system_prompt: Optional[str] = None

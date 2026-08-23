@@ -65,7 +65,11 @@ opsd_params:
   top_p: 1.0
   top_k_loss: 32
   jsd_beta: 0.5
-  token_clip: 0.05
-  teacher_load_in_4bit: true
+  # Per-token JSD clamp. 0.05 saturates on nearly every token (JSD on a
+  # mismatched policy sits well above it), zeroing the gradient. 0 disables.
+  token_clip: 1.0
+  # 0.5B fp16 fits a 15 GB T4 with room to spare; 4-bit buys nothing here and
+  # adds a bitsandbytes crash surface during weight materialization.
+  teacher_load_in_4bit: false
   student_thinking: false
   teacher_thinking: true
