@@ -117,6 +117,13 @@ class GRPOParams(BaseModel):
     syntax_reward_weight: float = Field(default=0.2, ge=0)
     reference_reward_weight: float = Field(default=0.6, ge=0)
     log_completions: bool = True
+    # Score completions with the adapter disabled (LoRA only) to plot KL drift
+    # from the starting policy even when beta == 0 adds no penalty.
+    log_reference_kl: bool = True
+    # Sample from LoRA merged into the base weights (restored exactly afterwards).
+    merge_lora_for_generation: bool = True
+    # Deterministic subsample of the prompt pool; None trains on every prompt.
+    max_prompts: Optional[PositiveInt] = None
     seed: int = 42
 
 

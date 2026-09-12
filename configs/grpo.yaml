@@ -1,7 +1,10 @@
 # Kaggle 2x T4 GRPO preset. Launch with `python train.py --method grpo ...`;
 # train.py creates one DDP process per GPU.
 model_params:
-  base_model: "Qwen/Qwen2.5-0.5B-Instruct"
+  # Start from the SFT checkpoint: it registers <think>/<answer> as tokens and
+  # emits them. The raw Instruct model never does, so the format reward stays ~0.
+  # The Kaggle notebook overrides this with the attached checkpoint path.
+  base_model: "out/outputs/sft_run1/checkpoint-epoch2-step150"
   model_type: "AutoModelForCausalLM"
   trust_remote_code: true
   load_in_8bit: false
@@ -44,7 +47,7 @@ training_params:
   optimizer: "adamw_8bit"
   gradient_checkpointing: true
   logging_steps: 5
-  save_steps: 100
+  save_steps: 50
   output_dir: "./outputs/grpo_run1"
   wandb_project: "issuefix_grpo"
   wandb_run_name: "qwen0.5_grpo_lora_dual_t4"
@@ -52,8 +55,16 @@ training_params:
 
 grpo_params:
   num_generations: 4
-  max_prompt_length: 1536
-  max_completion_length: 512
+  # Deterministic subsample; null = every prompt. Merged-LoRA sampling ran ~46
+  # ms/token on a 3060, so a 4 x 2048-token rollout that hits the cap takes ~95 s:
+  # ~800 prompts across two T4s fits one 12 h session in the worst case.
+  # Recalibrate from the smoke run's perf/gen_tokens_per_s.
+  max_prompts: 800
+  max_prompt_length: 2048
+  # SFT <think> traces run 350-770 tokens; truncated rollouts are masked out of
+  # the loss. 2048 fits easily: the policy update peaked at 5.8 GiB (prompt 1536
+  # + completion 2048) on a 12 GB 3060. Time, not memory, is the cost.
+  max_completion_length: 2048
   forward_batch_size: 1
   temperature: 1.0
   top_p: 1.0
@@ -66,4 +77,6 @@ grpo_params:
   syntax_reward_weight: 0.2
   reference_reward_weight: 0.6
   log_completions: true
+  log_reference_kl: true
+  merge_lora_for_generation: true
   seed: 42

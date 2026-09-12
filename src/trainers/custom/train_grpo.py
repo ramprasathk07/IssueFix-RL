@@ -13,8 +13,11 @@ from __future__ import annotations
 import ast
 import json
 import math
+import random
 import re
-from contextlib import nullcontext
+import time
+from collections import defaultdict
+from contextlib import contextmanager, nullcontext
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -34,6 +37,7 @@ from transformers import (
 
 from configs import Config
 from data.loader import SYSTEM_PROMPT
+from trainers.utils.loss_helper import entropy_from_logits
 
 
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL | re.IGNORECASE)
@@ -42,7 +46,13 @@ _FORMAT_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _FENCE_RE = re.compile(r"^\s*```(?:python)?\s*|\s*```\s*$", re.IGNORECASE)
+_CONTROL_TOKEN_RE = re.compile(r"<\|[^|<>]*\|>")
 _TRAINING_STATE_FILE = "training_state.pt"
+# Peak-style metrics reduce with max over the log window and across ranks; the
+# rest are means.
+_MAX_REDUCED_METRICS = frozenset(
+    {"completion/length_max", "policy/ratio_max", "perf/gpu_mem_peak_gb"}
+)
 
 
 def _completion_text(completion: Any) -> str:
@@ -60,6 +70,16 @@ def _answer(text: str) -> str:
     match = _ANSWER_RE.search(text)
     value = match.group(1) if match else text
     return _FENCE_RE.sub("", value).strip()
+
+
+def strip_control_tokens(text: str) -> str:
+    """Remove chat control tokens such as <|im_end|> while keeping reasoning tags.
+
+    Completions are decoded with special tokens kept because the SFT tokenizer
+    registers <think>/<answer> as special tokens; skip_special_tokens=True would
+    erase them and zero the format reward for every rollout.
+    """
+    return _CONTROL_TOKEN_RE.sub("", text)
 
 
 def format_reward(completions, **kwargs) -> list[float]:
@@ -175,10 +195,12 @@ def _grpo_token_terms(
     clip_indicator = ratio.ne(clipped_ratio).to(current_logps.dtype)
 
     reference_kl = torch.zeros_like(current_logps)
-    if reference_logps is not None and beta:
+    if reference_logps is not None:
         reference_delta = reference_logps - current_logps
         reference_kl = reference_delta.exp() - reference_delta - 1.0
-        objective = objective - beta * reference_kl
+        # beta == 0 still reports drift from the reference; it just adds no penalty.
+        if beta:
+            objective = objective - beta * reference_kl
 
     return -objective, policy_kl, clip_indicator, reference_kl
 
@@ -286,6 +308,12 @@ class GRPOIssueFixTrainer:
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+        if self.grpo_cfg.format_reward_weight > 0 and "<think>" not in self.tokenizer.get_vocab():
+            self.accelerator.print(
+                "[grpo] WARNING: the tokenizer has no <think> token, so base_model is not the "
+                "SFT checkpoint and the format reward will stay near 0. Point "
+                "model_params.base_model at the SFT checkpoint directory."
+            )
 
         dtype = (
             torch.bfloat16
@@ -394,7 +422,25 @@ class GRPOIssueFixTrainer:
             raise ValueError(
                 "No usable GRPO rows; expected problem/prompt and solution/response fields."
             )
-        return records
+        # Drop over-long prompts instead of truncating them: the tokenizer truncates
+        # from the left, which would cut the system prompt out of the chat template.
+        limit = self.grpo_cfg.max_prompt_length
+        kept = [
+            row for row in records
+            if len(self.tokenizer(self._prompt_text(row["problem"]),
+                                  add_special_tokens=False).input_ids) <= limit
+        ]
+        dropped = len(records) - len(kept)
+        if not kept:
+            raise ValueError(f"Every prompt exceeds max_prompt_length={limit} tokens.")
+        if self.grpo_cfg.max_prompts and len(kept) > self.grpo_cfg.max_prompts:
+            # Same seed on every rank, so all DDP workers draw the same subset.
+            kept = random.Random(self.grpo_cfg.seed).sample(kept, self.grpo_cfg.max_prompts)
+        self.accelerator.print(
+            f"[data] {len(records)} rows | dropped {dropped} over {limit} prompt tokens | "
+            f"training on {len(kept)} prompts"
+        )
+        return kept
 
     def _prompt_text(self, problem: str) -> str:
         return self.tokenizer.apply_chat_template(
@@ -419,10 +465,18 @@ class GRPOIssueFixTrainer:
         attention_mask: torch.Tensor,
         prompt_width: int,
         completion_ids: torch.Tensor,
-    ) -> torch.Tensor:
+        with_entropy: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-        completion_logits = outputs.logits[:, prompt_width - 1 : -1]
-        return self._selective_log_softmax(completion_logits, completion_ids).float()
+        # Upcast before logsumexp: over a 151k-token vocab, fp16 rounding alone
+        # shifts token log-probs by ~1e-2, which leaks straight into the ratio.
+        completion_logits = outputs.logits[:, prompt_width - 1 : -1].float()
+        logps = self._selective_log_softmax(completion_logits, completion_ids)
+        if not with_entropy:
+            return logps
+        with torch.no_grad():
+            entropy = entropy_from_logits(completion_logits.detach())
+        return logps, entropy
 
     @torch.no_grad()
     def _batched_logps(
@@ -432,21 +486,29 @@ class GRPOIssueFixTrainer:
         attention_mask: torch.Tensor,
         prompt_width: int,
         completion_ids: torch.Tensor,
-    ) -> torch.Tensor:
-        batches = []
+        with_entropy: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        logps, entropies = [], []
         micro_batch = self.grpo_cfg.forward_batch_size
         for start in range(0, input_ids.shape[0], micro_batch):
             stop = start + micro_batch
             with self.accelerator.autocast():
-                logps = self._forward_logps(
+                result = self._forward_logps(
                     model,
                     input_ids[start:stop],
                     attention_mask[start:stop],
                     prompt_width,
                     completion_ids[start:stop],
+                    with_entropy=with_entropy,
                 )
-            batches.append(logps.detach())
-        return torch.cat(batches, dim=0)
+            if with_entropy:
+                logps.append(result[0].detach())
+                entropies.append(result[1])
+            else:
+                logps.append(result.detach())
+        if with_entropy:
+            return torch.cat(logps, dim=0), torch.cat(entropies, dim=0)
+        return torch.cat(logps, dim=0)
 
     def _reward_rollouts(
         self,
@@ -469,8 +531,33 @@ class GRPOIssueFixTrainer:
         )
         return reward, components
 
+    @contextmanager
+    def _merged_adapter(self, raw_model: nn.Module):
+        """Merge LoRA into the base weights for sampling, then restore them exactly.
+
+        Merged sampling measured ~1.8x faster than the unmerged adapter (46 vs 82
+        ms/token on a 3060). unmerge_adapter() alone subtracts the delta back out
+        in fp16, drifting the frozen base weights a little every rollout, so saved
+        copies are written back afterwards.
+        """
+        if not (self.model_cfg.use_lora and self.grpo_cfg.merge_lora_for_generation):
+            yield False
+            return
+        from peft.tuners.lora import LoraLayer
+
+        layers = [module for module in raw_model.modules() if isinstance(module, LoraLayer)]
+        saved = [layer.get_base_layer().weight.detach().clone() for layer in layers]
+        raw_model.merge_adapter()
+        try:
+            yield True
+        finally:
+            raw_model.unmerge_adapter()
+            for layer, weight in zip(layers, saved):
+                layer.get_base_layer().weight.data.copy_(weight)
+
     @torch.no_grad()
     def _rollout(self, batch: dict[str, list[str]]) -> dict[str, Any]:
+        rollout_start = time.perf_counter()
         prompt_texts = [self._prompt_text(problem) for problem in batch["problem"]]
         prompt_inputs = self.tokenizer(
             prompt_texts,
@@ -485,22 +572,27 @@ class GRPOIssueFixTrainer:
         raw_model.eval()
         previous_cache_setting = raw_model.config.use_cache
         raw_model.config.use_cache = True
+        generation_start = time.perf_counter()
         try:
-            with self.accelerator.autocast():
-                generated_ids = raw_model.generate(
-                    **prompt_inputs,
-                    max_new_tokens=self.grpo_cfg.max_completion_length,
-                    do_sample=True,
-                    temperature=self.grpo_cfg.temperature,
-                    top_p=self.grpo_cfg.top_p,
-                    num_return_sequences=self.grpo_cfg.num_generations,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                    use_cache=True,
-                    synced_gpus=self.accelerator.num_processes > 1,
-                )
+            with self._merged_adapter(raw_model) as merged:
+                # Merged fp16 weights sampled fastest without autocast; the unmerged
+                # adapter was faster with it.
+                with nullcontext() if merged else self.accelerator.autocast():
+                    generated_ids = raw_model.generate(
+                        **prompt_inputs,
+                        max_new_tokens=self.grpo_cfg.max_completion_length,
+                        do_sample=True,
+                        temperature=self.grpo_cfg.temperature,
+                        top_p=self.grpo_cfg.top_p,
+                        num_return_sequences=self.grpo_cfg.num_generations,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                        use_cache=True,
+                        synced_gpus=self.accelerator.num_processes > 1,
+                    )
         finally:
             raw_model.config.use_cache = previous_cache_setting
+        generation_seconds = time.perf_counter() - generation_start
 
         generations = self.grpo_cfg.num_generations
         prompt_width = prompt_inputs["input_ids"].shape[1]
@@ -510,21 +602,32 @@ class GRPOIssueFixTrainer:
             generations, dim=0
         )
         full_input_ids = torch.cat([repeated_prompt_ids, completion_ids], dim=1)
+        eos_token_id = self.tokenizer.eos_token_id
+        pad_token_id = (
+            self.tokenizer.pad_token_id
+            if self.tokenizer.pad_token_id != eos_token_id
+            else None
+        )
         completion_mask = build_completion_mask(
             completion_ids,
-            self.tokenizer.eos_token_id,
-            self.tokenizer.pad_token_id
-            if self.tokenizer.pad_token_id != self.tokenizer.eos_token_id
-            else None,
+            eos_token_id,
+            pad_token_id,
             self.grpo_cfg.mask_truncated_completions,
         )
+        # Diagnostics only: lengths count truncated rollouts too, even when their
+        # tokens are masked out of the loss.
+        completion_lengths = build_completion_mask(
+            completion_ids, eos_token_id, pad_token_id, mask_truncated=False
+        ).sum(dim=1)
+        stopped = completion_ids.eq(eos_token_id).any(dim=1)
         full_attention_mask = torch.cat(
             [repeated_prompt_mask, completion_mask.to(repeated_prompt_mask.dtype)], dim=1
         )
 
-        completion_texts = self.tokenizer.batch_decode(
-            completion_ids, skip_special_tokens=True
-        )
+        completion_texts = [
+            strip_control_tokens(text)
+            for text in self.tokenizer.batch_decode(completion_ids, skip_special_tokens=False)
+        ]
         solutions = [
             solution
             for solution in batch["solution"]
@@ -536,16 +639,19 @@ class GRPOIssueFixTrainer:
             num_generations=self.grpo_cfg.num_generations,
             epsilon=self.grpo_cfg.advantage_epsilon,
         )
-        old_logps = self._batched_logps(
+        old_logps, entropy = self._batched_logps(
             raw_model,
             full_input_ids,
             full_attention_mask,
             prompt_width,
             completion_ids,
+            with_entropy=True,
         )
 
         reference_logps = None
-        if self.grpo_cfg.beta > 0:
+        if self.grpo_cfg.beta > 0 or (
+            self.grpo_cfg.log_reference_kl and self.model_cfg.use_lora
+        ):
             with raw_model.disable_adapter():
                 reference_logps = self._batched_logps(
                     raw_model,
@@ -567,6 +673,11 @@ class GRPOIssueFixTrainer:
             "rewards": rewards,
             "reward_components": reward_components,
             "completion_texts": completion_texts,
+            "completion_lengths": completion_lengths,
+            "stopped": stopped,
+            "entropy": entropy,
+            "generation_seconds": generation_seconds,
+            "rollout_seconds": time.perf_counter() - rollout_start,
         }
 
     def _update_policy(
@@ -575,6 +686,7 @@ class GRPOIssueFixTrainer:
         accumulation_divisor: int,
         synchronize_gradients: bool,
     ) -> dict[str, float]:
+        update_start = time.perf_counter()
         self.model.train()
         mask = rollout["completion_mask"]
         mask_float = mask.float()
@@ -583,10 +695,13 @@ class GRPOIssueFixTrainer:
         valid_sequence_count = sequence_lengths.gt(0).sum().clamp_min(1)
         micro_batch = self.grpo_cfg.forward_batch_size
 
-        loss_total = torch.zeros((), device=self.accelerator.device)
-        policy_kl_total = torch.zeros((), device=self.accelerator.device)
-        reference_kl_total = torch.zeros((), device=self.accelerator.device)
-        clipped_total = torch.zeros((), device=self.accelerator.device)
+        device = self.accelerator.device
+        loss_total = torch.zeros((), device=device)
+        kl_penalty_total = torch.zeros((), device=device)
+        policy_kl_total = torch.zeros((), device=device)
+        clipped_total = torch.zeros((), device=device)
+        ratio_total = torch.zeros((), device=device)
+        ratio_max = torch.zeros((), device=device)
         sample_count = rollout["input_ids"].shape[0]
 
         for start in range(0, sample_count, micro_batch):
@@ -598,6 +713,7 @@ class GRPOIssueFixTrainer:
                 if should_sync_now
                 else self.accelerator.no_sync(self.model)
             )
+            old_logps = rollout["old_logps"][start:stop]
 
             with sync_context:
                 with self.accelerator.autocast():
@@ -610,7 +726,7 @@ class GRPOIssueFixTrainer:
                     )
                     token_loss, policy_kl, clipped, reference_kl = _grpo_token_terms(
                         current_logps,
-                        rollout["old_logps"][start:stop],
+                        old_logps,
                         rollout["advantages"][start:stop],
                         self.grpo_cfg.epsilon,
                         None
@@ -631,18 +747,29 @@ class GRPOIssueFixTrainer:
 
                 self.accelerator.backward(chunk_loss / accumulation_divisor)
 
+            # The loss splits into the clipped surrogate and the beta-scaled
+            # reference-KL penalty; the penalty is zero when beta == 0.
+            kl_penalty_total += self.grpo_cfg.beta * (reference_kl.detach() * weights).sum()
             loss_total += chunk_loss.detach()
+            ratio = (current_logps.detach() - old_logps).exp() * chunk_mask
+            ratio_total += ratio.sum()
+            ratio_max = torch.maximum(ratio_max, ratio.max())
             policy_kl_total += (policy_kl.detach() * chunk_mask).sum()
-            reference_kl_total += (reference_kl.detach() * chunk_mask).sum()
             clipped_total += (clipped.detach() * chunk_mask).sum()
 
+        loss = loss_total.item()
+        kl_penalty = kl_penalty_total.item()
         return {
-            "loss": loss_total.item(),
-            "approx_kl": (policy_kl_total / total_tokens).item(),
-            "reference_kl": (reference_kl_total / total_tokens).item(),
-            "clip_fraction": (clipped_total / total_tokens).item(),
-            "completion_tokens": mask_float.sum(dim=1).mean().item(),
-            "valid_completion_fraction": sequence_lengths.gt(0).float().mean().item(),
+            "loss/total": loss,
+            "loss/policy": loss - kl_penalty,
+            "loss/kl_penalty": kl_penalty,
+            "kl/old_policy": (policy_kl_total / total_tokens).item(),
+            "policy/clip_fraction": (clipped_total / total_tokens).item(),
+            "policy/ratio_mean": (ratio_total / total_tokens).item(),
+            "policy/ratio_max": ratio_max.item(),
+            "completion/loss_tokens": sequence_lengths.mean().item(),
+            "completion/valid_fraction": sequence_lengths.gt(0).float().mean().item(),
+            "perf/update_s": time.perf_counter() - update_start,
         }
 
     def _load_training_state(self, resume_dir: Path) -> dict[str, Any]:
@@ -699,58 +826,125 @@ class GRPOIssueFixTrainer:
         except ImportError:
             print("wandb unavailable; continuing without it")
 
-    def _mean_across_processes(self, value: float) -> float:
-        value_tensor = torch.tensor(value, device=self.accelerator.device)
-        return self.accelerator.reduce(value_tensor, reduction="mean").item()
+    def _reduce_across_processes(self, value: float, op: str) -> float:
+        gathered = self.accelerator.gather(
+            torch.tensor([value], device=self.accelerator.device, dtype=torch.float32)
+        )
+        return (gathered.max() if op == "max" else gathered.mean()).item()
+
+    def _rollout_metrics(self, rollout: dict[str, Any]) -> dict[str, float]:
+        """Reward, KL, entropy, and generation diagnostics for one rollout on this rank."""
+        rewards = rollout["rewards"].float()
+        groups = rewards.reshape(-1, self.grpo_cfg.num_generations)
+        advantages = rollout["advantages"].float()
+        lengths = rollout["completion_lengths"].float()
+        # Every sampled token through EOS, including truncated rollouts the loss
+        # masks out: these metrics describe what the policy actually generated.
+        positions = torch.arange(rollout["entropy"].shape[1], device=lengths.device)
+        sampled = (positions.unsqueeze(0) < lengths.unsqueeze(1)).float()
+        sampled_tokens = sampled.sum().clamp_min(1.0)
+
+        def token_mean(values: torch.Tensor) -> float:
+            return ((values.float() * sampled).sum() / sampled_tokens).item()
+
+        metrics = {
+            "reward/mean": rewards.mean().item(),
+            "reward/std": rewards.std(unbiased=False).item(),
+            # A group whose completions all score the same gets zero advantage:
+            # that prompt contributes no learning signal this step.
+            "reward/frac_zero_std_groups": (
+                groups.std(dim=1, unbiased=False).lt(1e-6).float().mean().item()
+            ),
+            "advantage/mean": advantages.mean().item(),
+            "advantage/std": advantages.std(unbiased=False).item(),
+            "advantage/abs_mean": advantages.abs().mean().item(),
+            "policy/entropy": token_mean(rollout["entropy"]),
+            "policy/logp_mean": token_mean(rollout["old_logps"]),
+            "completion/length_mean": lengths.mean().item(),
+            "completion/length_max": lengths.max().item(),
+            "completion/truncated_fraction": 1.0 - rollout["stopped"].float().mean().item(),
+            "perf/rollout_s": rollout["rollout_seconds"],
+            "perf/generation_s": rollout["generation_seconds"],
+            "perf/gen_tokens_per_s": (
+                lengths.sum().item() / max(rollout["generation_seconds"], 1e-6)
+            ),
+        }
+        reference_logps = rollout.get("reference_logps")
+        if reference_logps is not None:
+            # KL(policy || reference) on the sampled tokens: k1 is the plain
+            # log-ratio (unbiased, can go negative), k3 is Schulman's low-variance
+            # estimator (always >= 0).
+            log_ratio = rollout["old_logps"] - reference_logps
+            metrics["kl/ref_k1"] = token_mean(log_ratio)
+            metrics["kl/ref_k3"] = token_mean((-log_ratio).exp() + log_ratio - 1.0)
+        for name, values in rollout["reward_components"].items():
+            metrics[f"reward/{name}"] = values.float().mean().item()
+        return metrics
 
     def _log_step(
         self,
-        metrics: dict[str, float],
+        window: dict[str, list[float]],
         rollout: dict[str, Any],
         global_step: int,
     ) -> None:
-        reduced = {key: self._mean_across_processes(value) for key, value in metrics.items()}
-        reward_components = rollout["reward_components"]
-        reduced.update(
-            {
-                "reward": self._mean_across_processes(rollout["rewards"].mean().item()),
-                "reward_std": self._mean_across_processes(
-                    rollout["rewards"].std(unbiased=False).item()
-                ),
-                "reward_format": self._mean_across_processes(
-                    reward_components["format"].mean().item()
-                ),
-                "reward_syntax": self._mean_across_processes(
-                    reward_components["syntax"].mean().item()
-                ),
-                "reward_reference": self._mean_across_processes(
-                    reward_components["reference"].mean().item()
-                ),
-                "lr": self.optimizer.param_groups[0]["lr"],
-            }
-        )
+        # Aggregate every rollout since the last log, not just the latest one: a
+        # single four-completion rollout is too noisy to plot.
+        reduced = {}
+        for key, values in sorted(window.items()):
+            op = "max" if key in _MAX_REDUCED_METRICS else "mean"
+            local = max(values) if op == "max" else sum(values) / len(values)
+            reduced[key] = self._reduce_across_processes(local, op)
+        reduced["optim/lr"] = self.optimizer.param_groups[0]["lr"]
         if not self.accelerator.is_main_process:
             return
 
         printable = " | ".join(
-            [
-                f"loss {reduced['loss']:.4f}",
-                f"reward {reduced['reward']:.4f}",
-                f"kl {reduced['approx_kl']:.5f}",
-                f"clip {reduced['clip_fraction']:.3f}",
-                f"tokens {reduced['completion_tokens']:.1f}",
-                f"lr {reduced['lr']:.2e}",
-            ]
+            f"{label} {reduced[key]:{fmt}}"
+            for label, key, fmt in (
+                ("loss", "loss/total", ".4f"),
+                ("reward", "reward/mean", ".4f"),
+                ("fmt", "reward/format", ".2f"),
+                ("ent", "policy/entropy", ".3f"),
+                ("kl_ref", "kl/ref_k3", ".5f"),
+                ("zero_std", "reward/frac_zero_std_groups", ".2f"),
+                ("trunc", "completion/truncated_fraction", ".2f"),
+                ("len", "completion/length_mean", ".0f"),
+                ("tok/s", "perf/gen_tokens_per_s", ".0f"),
+                ("mem", "perf/gpu_mem_peak_gb", ".1f"),
+                ("lr", "optim/lr", ".2e"),
+            )
+            if key in reduced
         )
         self.accelerator.print(f"[grpo] step {global_step} | {printable}")
+
+        rewards = rollout["rewards"].float().cpu()
         if self._wandb and self._wandb.run is not None:
-            self._wandb.run.log(
-                {f"train/{key}": value for key, value in reduced.items()},
-                step=global_step,
+            payload = dict(reduced)
+            payload["reward/hist"] = self._wandb.Histogram(rewards.numpy())
+            payload["completion/length_hist"] = self._wandb.Histogram(
+                rollout["completion_lengths"].float().cpu().numpy()
             )
+            if self.grpo_cfg.log_completions:
+                components = {
+                    name: values.float().cpu()
+                    for name, values in rollout["reward_components"].items()
+                }
+                table = self._wandb.Table(
+                    columns=["step", "completion", "reward", *components, "stopped"]
+                )
+                for index, text in enumerate(rollout["completion_texts"]):
+                    table.add_data(
+                        global_step,
+                        text[:4000],
+                        rewards[index].item(),
+                        *(values[index].item() for values in components.values()),
+                        bool(rollout["stopped"][index]),
+                    )
+                payload["samples/completions"] = table
+            self._wandb.run.log(payload, step=global_step)
         if self.grpo_cfg.log_completions:
             for index, text in enumerate(rollout["completion_texts"][:2], start=1):
-                reward = rollout["rewards"][index - 1].item()
+                reward = rewards[index - 1].item()
                 print(f"[grpo completion {index} | reward={reward:.3f}]\n{text[:1000]}")
 
     def __call__(self, data_path: str, resume_from: str | None = None):
@@ -800,6 +994,7 @@ class GRPOIssueFixTrainer:
         )
 
         self.optimizer.zero_grad(set_to_none=True)
+        window: defaultdict[str, list[float]] = defaultdict(list)
         for epoch in range(start_epoch, self.train_cfg.num_epochs):
             if hasattr(loader, "set_epoch"):
                 loader.set_epoch(epoch)
@@ -825,6 +1020,8 @@ class GRPOIssueFixTrainer:
                     accumulation_divisor=accumulation_divisor,
                     synchronize_gradients=should_step,
                 )
+                for key, value in {**metrics, **self._rollout_metrics(rollout)}.items():
+                    window[key].append(value)
 
                 if should_step:
                     grad_norm = self.accelerator.clip_grad_norm_(
@@ -834,14 +1031,21 @@ class GRPOIssueFixTrainer:
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     global_step += 1
-                    metrics["grad_norm"] = float(grad_norm)
+                    window["optim/grad_norm"].append(float(grad_norm))
+                    if torch.cuda.is_available():
+                        window["perf/gpu_mem_peak_gb"].append(
+                            torch.cuda.max_memory_allocated(self.accelerator.device) / 2**30
+                        )
                     progress.set_postfix(
-                        loss=f"{metrics['loss']:.4f}",
+                        loss=f"{metrics['loss/total']:.4f}",
                         reward=f"{rollout['rewards'].mean().item():.3f}",
                     )
 
                     if global_step % self.train_cfg.logging_steps == 0:
-                        self._log_step(metrics, rollout, global_step)
+                        self._log_step(window, rollout, global_step)
+                        window.clear()
+                        if torch.cuda.is_available():
+                            torch.cuda.reset_peak_memory_stats(self.accelerator.device)
                     if global_step % self.train_cfg.save_steps == 0:
                         self._save_checkpoint(epoch, batch_idx, global_step)
 

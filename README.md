@@ -234,17 +234,49 @@ weight, and requires `model_params.load_in_4bit: false`.
 The repository-owned GRPO loop uses PyTorch for grouped rollouts, normalized
 advantages, the clipped policy objective, optional reference-policy KL, and
 checkpointing. Transformers, Accelerate, and PEFT provide model loading, DDP,
-mixed precision, and LoRA; TRL is not required. Four on-policy completions per
-prompt combine response-format, Python-syntax, and verified-solution-similarity
-rewards. Generated code is parsed but never executed:
+mixed precision, and LoRA; TRL is not required.
+
+Start from the SFT checkpoint (`model_params.base_model`), not the raw Instruct
+model: only the SFT model emits `<think>`/`<answer>`, and its tokenizer registers
+them as special tokens. Four completions per prompt are scored on response
+format, Python syntax, and similarity to the verified solution. Generated code
+is parsed but never executed, so these rewards shape format and style; they do
+not measure correctness.
 
 ```bash
+python datasets/prepare_rl_pool.py   # builds datasets/processed/rl/; slow, runs every gold solution's tests
 python train.py --method grpo --finetuning lora \
   --config configs/grpo.yaml \
-  --data datasets/processed/opencode_sft_filtered.jsonl
+  --data datasets/processed/rl/rl_train_mix.jsonl
 ```
 
-On a dual-T4 machine, `train.py` launches two DDP workers automatically. Each
-prompt expands to `grpo_params.num_generations` completions. Keep
+`datasets/prepare_rl_pool.py` downloads MBPP and KodCode-Light-RL-10K for
+training and HumanEvalPack-Python (HumanEvalFix) for evaluation, normalizes them
+to one JSONL schema, and keeps a row only if its gold solution passes its own
+tests. Every row has `problem` and `solution` (what the GRPO loader reads) plus
+`test_code`, a pytest module that imports the candidate from `solution.py`, so an
+execution reward can score against the same files. `manifest.json` records
+per-source counts, filters, and licenses. The HumanEvalFix file is eval-only;
+never train on it. The older `opencode_sft_filtered_*.jsonl` prompts still load
+but carry no tests.
+
+On Kaggle, run `kaggle-notebook/grpo-v1.ipynb`, smoke-test mode first. On a
+dual-T4 machine, `train.py` launches two DDP workers automatically. Keep
 `dataloader_params.batch_size` small and use `grpo_params.forward_batch_size`
 to bound the memory used while scoring completion tokens.
+
+Logged to wandb, grouped into sections by prefix and averaged over each logging
+window: `reward/` (mean, std, each component, `frac_zero_std_groups`),
+`advantage/` (mean, std, abs mean), `kl/` (`ref_k1` and `ref_k3` against the
+starting policy, `old_policy`), `policy/` (entropy, sampled-token log-prob, clip
+fraction, ratio mean/max), `loss/` (total, clipped-surrogate policy term,
+`kl_penalty`), `completion/` (length mean/max, truncation, loss tokens),
+`optim/` (grad norm, lr), and `perf/` (rollout, generation and update seconds,
+generated tokens/s, peak GPU memory), plus reward and length histograms and a
+`samples/completions` table. The ratio-based `kl/old_policy` and
+`policy/clip_fraction` stay near zero by construction: each rollout gets exactly
+one policy update.
+
+For sampling, LoRA is merged into the base weights and the saved weights are
+restored afterwards, which measured ~1.8x faster than sampling through the
+unmerged adapter.

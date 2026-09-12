@@ -13,6 +13,8 @@ from trainers.custom.train_grpo import (
     group_normalized_advantages,
     python_syntax_reward,
     reference_similarity_reward,
+    strip_control_tokens,
+    _grpo_token_terms,
 )
 
 
@@ -192,6 +194,100 @@ def test_microbatched_policy_update_backpropagates():
         synchronize_gradients=True,
     )
 
-    assert metrics["approx_kl"] == pytest.approx(0.0)
+    assert metrics["kl/old_policy"] == pytest.approx(0.0)
+    assert metrics["policy/ratio_mean"] == pytest.approx(1.0)
+    assert metrics["loss/kl_penalty"] == pytest.approx(0.0)
+    assert metrics["loss/policy"] == pytest.approx(metrics["loss/total"])
     assert trainer.model.token_logits.grad is not None
     assert trainer.model.token_logits.grad.abs().sum().item() > 0
+
+
+def test_decoded_control_tokens_are_stripped_but_reasoning_tags_kept():
+    decoded = "<think>off by one</think><answer>print(1)</answer><|im_end|><|endoftext|>"
+    assert format_reward([decoded]) == [0.0]
+
+    cleaned = strip_control_tokens(decoded)
+
+    assert cleaned == "<think>off by one</think><answer>print(1)</answer>"
+    assert format_reward([cleaned]) == [1.0]
+    assert python_syntax_reward([cleaned]) == [1.0]
+
+
+def test_reference_kl_is_reported_even_without_penalty():
+    current_logps = torch.zeros((1, 1))
+    reference_logps = torch.full_like(current_logps, -1.0)
+
+    token_loss, _, _, reference_kl = _grpo_token_terms(
+        current_logps,
+        torch.zeros_like(current_logps),
+        torch.zeros(1),
+        epsilon=0.2,
+        reference_logps=reference_logps,
+        beta=0.0,
+    )
+
+    assert reference_kl.item() > 0
+    assert token_loss.item() == pytest.approx(0.0)
+
+
+def test_rollout_metrics_cover_reward_kl_entropy_and_truncation():
+    trainer = GRPOIssueFixTrainer.__new__(GRPOIssueFixTrainer)
+    trainer.grpo_cfg = SimpleNamespace(num_generations=2)
+    old_logps = torch.full((4, 3), math.log(0.5))
+    rollout = {
+        "rewards": torch.tensor([0.5, 0.5, 0.0, 1.0]),
+        "advantages": torch.tensor([0.0, 0.0, -1.0, 1.0]),
+        "reward_components": {"format": torch.tensor([1.0, 1.0, 0.0, 1.0])},
+        "stopped": torch.tensor([True, True, False, True]),
+        "completion_lengths": torch.tensor([1, 2, 3, 2]),
+        "entropy": torch.full((4, 3), 0.7),
+        "old_logps": old_logps,
+        "reference_logps": old_logps - 1.0,
+        "rollout_seconds": 2.0,
+        "generation_seconds": 1.0,
+    }
+
+    metrics = trainer._rollout_metrics(rollout)
+
+    assert metrics["reward/frac_zero_std_groups"] == pytest.approx(0.5)
+    assert metrics["reward/format"] == pytest.approx(0.75)
+    assert metrics["completion/truncated_fraction"] == pytest.approx(0.25)
+    assert metrics["completion/length_mean"] == pytest.approx(2.0)
+    assert metrics["completion/length_max"] == pytest.approx(3.0)
+    assert metrics["policy/entropy"] == pytest.approx(0.7)
+    assert metrics["policy/logp_mean"] == pytest.approx(math.log(0.5))
+    assert metrics["kl/ref_k1"] == pytest.approx(1.0)
+    assert metrics["kl/ref_k3"] == pytest.approx(math.exp(-1.0))
+    assert metrics["perf/gen_tokens_per_s"] == pytest.approx(8.0)
+
+
+def test_merged_adapter_restores_base_weights_exactly():
+    from peft import LoraConfig, get_peft_model
+
+    class Tiny(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.proj = torch.nn.Linear(4, 4)
+
+        def forward(self, x):
+            return self.proj(x)
+
+    model = get_peft_model(Tiny(), LoraConfig(r=2, lora_alpha=4, target_modules=["proj"]))
+    for name, parameter in model.named_parameters():
+        if "lora_B" in name:
+            torch.nn.init.normal_(parameter)
+    base = model.base_model.model.proj.base_layer.weight
+    original = base.detach().clone()
+    x = torch.randn(3, 4)
+    expected = model(x).detach()
+
+    trainer = GRPOIssueFixTrainer.__new__(GRPOIssueFixTrainer)
+    trainer.model_cfg = SimpleNamespace(use_lora=True)
+    trainer.grpo_cfg = SimpleNamespace(merge_lora_for_generation=True)
+    with torch.no_grad(), trainer._merged_adapter(model) as merged:
+        assert merged
+        assert not torch.equal(base, original)
+        assert torch.allclose(model(x), expected, atol=1e-5)
+
+    assert torch.equal(base, original)
+    assert torch.allclose(model(x), expected)
