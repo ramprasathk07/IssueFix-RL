@@ -66,7 +66,10 @@ grpo_params:
   # + completion 2048) on a 12 GB 3060. Time, not memory, is the cost.
   max_completion_length: 2048
   forward_batch_size: 1
-  temperature: 1.0
+  # Local calibration, 16 MBPP prompts x 4 samples from the SFT checkpoint:
+  # T=1.0 gave 2% format-valid, 2% parseable, 50% stopped (median 1019 tokens);
+  # T=0.7 gave 5%, 16%, 78% (median 280). Log-probs are scored at this T too.
+  temperature: 0.7
   top_p: 1.0
   beta: 0.0
   epsilon: 0.2

@@ -164,6 +164,7 @@ def test_microbatched_policy_update_backpropagates():
         epsilon=0.2,
         beta=0.0,
         loss_type="dapo",
+        temperature=1.0,
     )
     trainer.model = TinyPolicy()
     input_ids = torch.tensor([[2, 2, 0, 0], [2, 2, 1, 1]])
@@ -291,3 +292,25 @@ def test_merged_adapter_restores_base_weights_exactly():
 
     assert torch.equal(base, original)
     assert torch.allclose(model(x), expected)
+
+
+def test_log_probs_are_scored_at_the_sampling_temperature():
+    class FixedLogits(torch.nn.Module):
+        def forward(self, input_ids, attention_mask, use_cache=False):
+            logits = torch.tensor([1.0, 2.0, 3.0]).expand(*input_ids.shape, -1)
+            return SimpleNamespace(logits=logits)
+
+    trainer = GRPOIssueFixTrainer.__new__(GRPOIssueFixTrainer)
+    trainer.grpo_cfg = SimpleNamespace(temperature=0.5)
+    input_ids = torch.tensor([[0, 1, 2]])
+
+    logps = trainer._forward_logps(
+        FixedLogits(),
+        input_ids,
+        torch.ones_like(input_ids),
+        prompt_width=1,
+        completion_ids=input_ids[:, 1:],
+    )
+
+    expected = (torch.tensor([1.0, 2.0, 3.0]) / 0.5).log_softmax(-1)[[1, 2]]
+    assert torch.allclose(logps[0], expected)

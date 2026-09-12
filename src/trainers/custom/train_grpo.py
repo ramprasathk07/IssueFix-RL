@@ -470,7 +470,11 @@ class GRPOIssueFixTrainer:
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
         # Upcast before logsumexp: over a 151k-token vocab, fp16 rounding alone
         # shifts token log-probs by ~1e-2, which leaks straight into the ratio.
-        completion_logits = outputs.logits[:, prompt_width - 1 : -1].float()
+        # Score at the sampling temperature, as TRL does: completions are drawn from
+        # softmax(logits / T), so the ratio, entropy, and KL must use the same scale.
+        completion_logits = (
+            outputs.logits[:, prompt_width - 1 : -1].float() / self.grpo_cfg.temperature
+        )
         logps = self._selective_log_softmax(completion_logits, completion_ids)
         if not with_entropy:
             return logps
