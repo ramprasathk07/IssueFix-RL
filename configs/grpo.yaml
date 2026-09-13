@@ -82,4 +82,7 @@ grpo_params:
   log_completions: true
   log_reference_kl: true
   merge_lora_for_generation: true
+  # Stop with a resumable checkpoint after this many hours (Kaggle: under 12).
+  max_runtime_hours: null
+  keep_last_checkpoints: 2
   seed: 42

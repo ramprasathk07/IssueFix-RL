@@ -1,4 +1,6 @@
+import json
 import math
+import time
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -15,6 +17,7 @@ from trainers.custom.train_grpo import (
     reference_similarity_reward,
     strip_control_tokens,
     _grpo_token_terms,
+    EpochShuffledRows,
 )
 
 
@@ -314,3 +317,54 @@ def test_log_probs_are_scored_at_the_sampling_temperature():
 
     expected = (torch.tensor([1.0, 2.0, 3.0]) / 0.5).log_softmax(-1)[[1, 2]]
     assert torch.allclose(logps[0], expected)
+
+
+def test_epoch_order_is_seeded_shared_and_resumable():
+    rows = [{"problem": str(i), "solution": ""} for i in range(20)]
+    first = EpochShuffledRows(rows, seed=7)
+    second = EpochShuffledRows(rows, seed=7)
+    epoch0 = [first[i]["problem"] for i in range(len(first))]
+
+    assert epoch0 == [second[i]["problem"] for i in range(len(second))]
+    assert sorted(epoch0, key=int) == [row["problem"] for row in rows]
+    first.set_epoch(1)
+    assert [first[i]["problem"] for i in range(len(first))] != epoch0
+    unshuffled = EpochShuffledRows(rows, seed=7, shuffle=False)
+    assert [unshuffled[i]["problem"] for i in range(20)] == [row["problem"] for row in rows]
+
+
+def test_runtime_budget_stops_every_rank_together():
+    class GatherAccelerator:
+        device = torch.device("cpu")
+
+        @staticmethod
+        def gather(tensor):
+            return tensor
+
+    trainer = GRPOIssueFixTrainer.__new__(GRPOIssueFixTrainer)
+    trainer.accelerator = GatherAccelerator()
+    trainer.grpo_cfg = SimpleNamespace(max_runtime_hours=None)
+    assert not trainer._out_of_time(run_start=0.0)
+
+    trainer.grpo_cfg.max_runtime_hours = 1.0
+    assert not trainer._out_of_time(run_start=time.perf_counter())
+    assert trainer._out_of_time(run_start=time.perf_counter() - 3601)
+
+
+def test_prune_keeps_only_the_newest_grpo_checkpoints(tmp_path):
+    for step in (50, 100, 150, 200):
+        checkpoint = tmp_path / f"checkpoint-epoch1-step{step}"
+        checkpoint.mkdir()
+        (checkpoint / "grpo_checkpoint.json").write_text(json.dumps({"global_step": step}))
+    (tmp_path / "checkpoint-epoch2-step150-sft").mkdir()
+
+    trainer = GRPOIssueFixTrainer.__new__(GRPOIssueFixTrainer)
+    trainer.train_cfg = SimpleNamespace(output_dir=str(tmp_path))
+    trainer.grpo_cfg = SimpleNamespace(keep_last_checkpoints=2)
+    trainer._prune_checkpoints()
+
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "checkpoint-epoch1-step150",
+        "checkpoint-epoch1-step200",
+        "checkpoint-epoch2-step150-sft",
+    ]

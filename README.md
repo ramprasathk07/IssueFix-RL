@@ -280,3 +280,14 @@ one policy update.
 For sampling, LoRA is merged into the base weights and the saved weights are
 restored afterwards, which measured ~1.8x faster than sampling through the
 unmerged adapter.
+
+`--finetuning full` trains every weight instead of LoRA: fp32 master weights under
+fp16 autocast (the fp16 grad scaler rejects fp16 gradients), plus a frozen fp16
+reference copy for the `kl/` metrics and `beta`. Checkpoints grow from tens of MB
+to ~3 GB, and sampling loses the merged-LoRA speedup.
+
+For runs longer than one Kaggle session, `grpo_params.max_runtime_hours` saves a
+resumable checkpoint and stops every rank at the same step before the deadline.
+Resuming restores the optimizer, LR schedule, data order (seeded per epoch and
+identical on every rank), and wandb run; `keep_last_checkpoints` prunes older
+checkpoints.

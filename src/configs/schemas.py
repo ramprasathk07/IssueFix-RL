@@ -122,6 +122,11 @@ class GRPOParams(BaseModel):
     log_reference_kl: bool = True
     # Sample from LoRA merged into the base weights (restored exactly afterwards).
     merge_lora_for_generation: bool = True
+    # Stop with a resumable checkpoint once this many hours have passed; keep it
+    # under Kaggle's 12 h wall so the session's outputs are saved.
+    max_runtime_hours: Optional[float] = Field(default=None, gt=0)
+    # Newest GRPO checkpoints kept in output_dir; older ones are deleted. 0 keeps all.
+    keep_last_checkpoints: int = Field(default=2, ge=0)
     # Deterministic subsample of the prompt pool; None trains on every prompt.
     max_prompts: Optional[PositiveInt] = None
     seed: int = 42

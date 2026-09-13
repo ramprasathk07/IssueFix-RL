@@ -15,6 +15,7 @@ import json
 import math
 import random
 import re
+import shutil
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
@@ -26,7 +27,7 @@ import torch
 from accelerate import Accelerator
 from accelerate.utils import set_seed
 from torch import nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 from transformers import (
     AutoModelForCausalLM,
@@ -252,6 +253,34 @@ def grpo_policy_loss(
     return loss, approx_kl, clip_fraction
 
 
+_CHECKPOINT_MARKER = "grpo_checkpoint.json"
+
+
+class EpochShuffledRows(Dataset):
+    """Prompt rows in a seeded per-epoch order that is identical on every rank.
+
+    The loader itself does not shuffle: a resumed session skips the batches it
+    already trained on, which is only correct if it replays the exact same order.
+    """
+
+    def __init__(self, rows: list[dict[str, str]], seed: int, shuffle: bool = True):
+        self.rows = rows
+        self.seed = seed
+        self.shuffle = shuffle
+        self.set_epoch(0)
+
+    def set_epoch(self, epoch: int) -> None:
+        self.order = list(range(len(self.rows)))
+        if self.shuffle:
+            random.Random(self.seed + epoch).shuffle(self.order)
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def __getitem__(self, index: int) -> dict[str, str]:
+        return self.rows[self.order[index]]
+
+
 class GRPOIssueFixTrainer:
     """Custom PyTorch GRPO trainer with LoRA, DDP, AMP, and checkpoint support."""
 
@@ -262,11 +291,6 @@ class GRPOIssueFixTrainer:
             raise ValueError(
                 "Quantized model placement is not supported by this multi-GPU GRPO path. "
                 "Use LoRA with fp16/bf16 weights instead."
-            )
-        if cfg.grpo_params.beta > 0 and not cfg.model_params.use_lora:
-            raise ValueError(
-                "beta > 0 requires LoRA so the frozen base policy can be used as the "
-                "reference model without allocating a second full model."
             )
         reward_weight = (
             cfg.grpo_params.format_reward_weight
@@ -293,6 +317,7 @@ class GRPOIssueFixTrainer:
         self.scheduler = None
         self._wandb = None
         self._resume_wandb_id: str | None = None
+        self.reference_model: nn.Module | None = None
 
     def _load_model(self, resume_dir: Path | None) -> None:
         tokenizer_source = (
@@ -320,6 +345,12 @@ class GRPOIssueFixTrainer:
             if self.train_cfg.bf16
             else (torch.float16 if self.train_cfg.fp16 else torch.float32)
         )
+        # Full fine-tuning under fp16 AMP needs fp32 master weights: the fp16 grad
+        # scaler refuses to unscale fp16 gradients. Autocast still computes in fp16.
+        # LoRA keeps the frozen base in fp16; PEFT holds its adapters in fp32.
+        weight_dtype = (
+            torch.float32 if self.train_cfg.fp16 and not self.model_cfg.use_lora else dtype
+        )
         model_source = (
             str(resume_dir)
             if resume_dir is not None and not self.model_cfg.use_lora
@@ -328,7 +359,7 @@ class GRPOIssueFixTrainer:
         model = AutoModelForCausalLM.from_pretrained(
             model_source,
             trust_remote_code=self.model_cfg.trust_remote_code,
-            dtype=dtype,
+            dtype=weight_dtype,
             device_map=None,
         )
 
@@ -363,6 +394,21 @@ class GRPOIssueFixTrainer:
                 module.p = 0.0
         model.config.use_cache = False
         self.model = model
+
+        # LoRA gets its reference for free (adapter disabled). Full fine-tuning
+        # needs a frozen copy of the starting weights to measure or penalize drift.
+        if not self.model_cfg.use_lora and (
+            self.grpo_cfg.beta > 0 or self.grpo_cfg.log_reference_kl
+        ):
+            reference = AutoModelForCausalLM.from_pretrained(
+                self.model_cfg.base_model,
+                trust_remote_code=self.model_cfg.trust_remote_code,
+                dtype=dtype,
+                device_map=None,
+            )
+            reference.requires_grad_(False)
+            reference.eval()
+            self.reference_model = reference.to(self.accelerator.device)
 
     def _make_optimizer(self) -> None:
         parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
@@ -653,17 +699,13 @@ class GRPOIssueFixTrainer:
         )
 
         reference_logps = None
-        if self.grpo_cfg.beta > 0 or (
-            self.grpo_cfg.log_reference_kl and self.model_cfg.use_lora
-        ):
-            with raw_model.disable_adapter():
-                reference_logps = self._batched_logps(
-                    raw_model,
-                    full_input_ids,
-                    full_attention_mask,
-                    prompt_width,
-                    completion_ids,
-                )
+        if self.grpo_cfg.beta > 0 or self.grpo_cfg.log_reference_kl:
+            reference_inputs = (full_input_ids, full_attention_mask, prompt_width, completion_ids)
+            if self.model_cfg.use_lora:
+                with raw_model.disable_adapter():
+                    reference_logps = self._batched_logps(raw_model, *reference_inputs)
+            else:
+                reference_logps = self._batched_logps(self.reference_model, *reference_inputs)
 
         return {
             "input_ids": full_input_ids,
@@ -809,9 +851,35 @@ class GRPOIssueFixTrainer:
                 },
                 output / _TRAINING_STATE_FILE,
             )
+            (output / _CHECKPOINT_MARKER).write_text(
+                json.dumps({
+                    "epoch": epoch,
+                    "batch_idx": batch_idx,
+                    "global_step": global_step,
+                    "use_lora": self.model_cfg.use_lora,
+                }),
+                encoding="utf-8",
+            )
             print(f"GRPO checkpoint saved -> {output}")
+            self._prune_checkpoints()
         self.accelerator.wait_for_everyone()
         return output
+
+    def _prune_checkpoints(self) -> None:
+        """Keep only the newest `keep_last_checkpoints` GRPO checkpoints."""
+        keep = self.grpo_cfg.keep_last_checkpoints
+        if not keep:
+            return
+        markers = Path(self.train_cfg.output_dir).glob(f"checkpoint-*/{_CHECKPOINT_MARKER}")
+        checkpoints = sorted(
+            (marker.parent for marker in markers),
+            key=lambda path: json.loads(
+                (path / _CHECKPOINT_MARKER).read_text(encoding="utf-8")
+            )["global_step"],
+        )
+        for stale in checkpoints[:-keep]:
+            shutil.rmtree(stale, ignore_errors=True)
+            print(f"GRPO checkpoint pruned -> {stale}")
 
     def _init_wandb(self) -> None:
         if not self.train_cfg.wandb_project or not self.accelerator.is_main_process:
@@ -835,6 +903,15 @@ class GRPOIssueFixTrainer:
             torch.tensor([value], device=self.accelerator.device, dtype=torch.float32)
         )
         return (gathered.max() if op == "max" else gathered.mean()).item()
+
+    def _out_of_time(self, run_start: float) -> bool:
+        budget = self.grpo_cfg.max_runtime_hours
+        if not budget:
+            return False
+        over = (time.perf_counter() - run_start) / 3600 >= budget
+        # Every rank must stop at the same optimizer step, or the next collective
+        # would wait forever for the rank that already left the loop.
+        return self._reduce_across_processes(float(over), "max") > 0
 
     def _rollout_metrics(self, rollout: dict[str, Any]) -> dict[str, float]:
         """Reward, KL, entropy, and generation diagnostics for one rollout on this rank."""
@@ -952,16 +1029,18 @@ class GRPOIssueFixTrainer:
                 print(f"[grpo completion {index} | reward={reward:.3f}]\n{text[:1000]}")
 
     def __call__(self, data_path: str, resume_from: str | None = None):
+        run_start = time.perf_counter()
         resume_dir = Path(resume_from) if resume_from else None
         self._load_model(resume_dir)
         self._make_optimizer()
         state = self._load_training_state(resume_dir) if resume_dir else None
 
         rows = self._load_rows(data_path)
+        dataset = EpochShuffledRows(rows, self.grpo_cfg.seed, shuffle=self.data_cfg.shuffle)
         loader_kwargs: dict[str, Any] = {
-            "dataset": rows,
+            "dataset": dataset,
             "batch_size": self.data_cfg.batch_size,
-            "shuffle": self.data_cfg.shuffle,
+            "shuffle": False,
             "num_workers": self.data_cfg.num_workers,
             "pin_memory": self.data_cfg.pin_memory,
             "collate_fn": self._collate,
@@ -999,9 +1078,9 @@ class GRPOIssueFixTrainer:
 
         self.optimizer.zero_grad(set_to_none=True)
         window: defaultdict[str, list[float]] = defaultdict(list)
+        out_of_time = False
         for epoch in range(start_epoch, self.train_cfg.num_epochs):
-            if hasattr(loader, "set_epoch"):
-                loader.set_epoch(epoch)
+            dataset.set_epoch(epoch)
             progress = tqdm(
                 loader,
                 desc=f"GRPO epoch {epoch + 1}/{self.train_cfg.num_epochs}",
@@ -1052,7 +1131,18 @@ class GRPOIssueFixTrainer:
                             torch.cuda.reset_peak_memory_stats(self.accelerator.device)
                     if global_step % self.train_cfg.save_steps == 0:
                         self._save_checkpoint(epoch, batch_idx, global_step)
+                    if self._out_of_time(run_start):
+                        self.accelerator.print(
+                            f"[grpo] runtime budget of {self.grpo_cfg.max_runtime_hours} h "
+                            f"reached at step {global_step}; saving a resumable checkpoint "
+                            "and stopping."
+                        )
+                        self._save_checkpoint(epoch, batch_idx, global_step)
+                        out_of_time = True
+                        break
 
+            if out_of_time:
+                break
             self._save_checkpoint(epoch, len(loader) - 1, global_step)
             start_batch = 0
 
