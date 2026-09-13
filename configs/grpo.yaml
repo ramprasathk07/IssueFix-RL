@@ -1,0 +1,85 @@
+# Kaggle 2x T4 GRPO preset. Launch with `python train.py --method grpo ...`;
+# train.py creates one DDP process per GPU.
+model_params:
+  # Start from the SFT checkpoint: it registers <think>/<answer> as tokens and
+  # emits them. The raw Instruct model never does, so the format reward stays ~0.
+  # The Kaggle notebook overrides this with the attached checkpoint path.
+  base_model: "out/outputs/sft_run1/checkpoint-epoch2-step150"
+  model_type: "AutoModelForCausalLM"
+  trust_remote_code: true
+  load_in_8bit: false
+  load_in_4bit: false
+  use_lora: true
+  lora_r: 16
+  lora_alpha: 32
+  # PPO-style likelihood ratios should be deterministic for a fixed sequence.
+  lora_dropout: 0.0
+  lora_target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
+
+dataloader_params:
+  # Prompts per GPU. Each prompt expands to num_generations rollouts; policy
+  # scoring is separately micro-batched by forward_batch_size below.
+  batch_size: 1
+  max_length: 2048
+  shuffle: true
+  num_workers: 0
+  pin_memory: false
+  pre_tokenize: false
+
+training_params:
+  learning_rate: 1e-5
+  num_epochs: 1
+  bf16: false
+  fp16: true
+  tf32: false
+  weight_decay: 0.0
+  max_grad_norm: 1.0
+  gradient_accumulation_steps: 2
+  warmup_steps: 25
+  lr_scheduler: "cosine"
+  optimizer: "adamw_8bit"
+  gradient_checkpointing: true
+  logging_steps: 5
+  save_steps: 50
+  output_dir: "./outputs/grpo_run1"
+  wandb_project: "issuefix_grpo"
+  wandb_run_name: "qwen0.5_grpo_lora_dual_t4"
+  num_gpus: 2
+
+grpo_params:
+  num_generations: 4
+  # Deterministic subsample; null = every prompt. Merged-LoRA sampling ran ~46
+  # ms/token on a 3060, so a 4 x 2048-token rollout that hits the cap takes ~95 s:
+  # ~800 prompts across two T4s fits one 12 h session in the worst case.
+  # Recalibrate from the smoke run's perf/gen_tokens_per_s.
+  max_prompts: 800
+  max_prompt_length: 2048
+  # SFT <think> traces run 350-770 tokens; truncated rollouts are masked out of
+  # the loss. 2048 fits easily: the policy update peaked at 5.8 GiB (prompt 1536
+  # + completion 2048) on a 12 GB 3060. Time, not memory, is the cost.
+  max_completion_length: 2048
+  forward_batch_size: 1
+  # Local calibration, 16 MBPP prompts x 4 samples from the SFT checkpoint:
+  # T=1.0 gave 2% format-valid, 2% parseable, 50% stopped (median 1019 tokens);
+  # T=0.7 gave 5%, 16%, 78% (median 280). Log-probs are scored at this T too.
+  temperature: 0.7
+  top_p: 1.0
+  beta: 0.0
+  epsilon: 0.2
+  advantage_epsilon: 1e-4
+  loss_type: "dapo"
+  mask_truncated_completions: true
+  format_reward_weight: 0.2
+  syntax_reward_weight: 0.2
+  reference_reward_weight: 0.6
+  log_completions: true
+  log_reference_kl: true
+  merge_lora_for_generation: true
+  seed: 42
